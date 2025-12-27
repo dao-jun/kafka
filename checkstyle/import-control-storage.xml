@@ -109,6 +109,14 @@
         <allow pkg="com.yammer.metrics" />
     </subpackage>
 
+    <subpackage name="storage.bookkeeper">
+        <allow pkg="org.apache.kafka.common" />
+        <allow pkg="org.apache.kafka.common.record" />
+        <allow pkg="org.apache.kafka.server.log.storage" />
+        <allow pkg="org.apache.kafka.storage.internals.log" />
+        <allow pkg="org.apache.kafka.storage.bookkeeper" />
+    </subpackage>
+
     <!-- START OF TIERED STORAGE INTEGRATION TEST IMPORT DEPENDENCIES -->
     <subpackage name="tiered.storage">
         <allow pkg="scala" />

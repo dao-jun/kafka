@@ -89,6 +89,7 @@ include 'clients',
     'shell',
     'storage',
     'storage:api',
+    'storage:bookkeeper',
     'streams',
     'streams:examples',
     'streams:integration-tests',
@@ -127,5 +128,6 @@ include 'clients',
     'test-common:test-common-runtime'
 
 project(":storage:api").name = "storage-api"
+project(":storage:bookkeeper").name = "storage-bookkeeper"
 rootProject.name = 'kafka'
 

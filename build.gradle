@@ -2438,6 +2438,36 @@ project(':storage') {
   }
 }
 
+project(':storage:storage-bookkeeper') {
+  base {
+    archivesName = "kafka-storage-bookkeeper"
+  }
+
+  dependencies {
+    implementation project(':clients')
+    implementation project(':storage:storage-api')
+    implementation project(':storage')
+    implementation project(':server-common')
+    implementation libs.slf4jApi
+
+    testImplementation project(':clients')
+    testImplementation project(':clients').sourceSets.test.output
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  javadoc {
+    enabled = false
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-storage.xml")
+  }
+}
+
 project(':tools:tools-api') {
   base {
     archivesName = "kafka-tools-api"
