@@ -80,6 +80,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ScheduledFuture;
@@ -1067,6 +1068,68 @@ public class UnifiedLog implements AutoCloseable {
                       true,
                       RecordBatch.CURRENT_MAGIC_VALUE,
                       TransactionVersion.TV_UNKNOWN);
+    }
+
+    /**
+     * Asynchronously append records to the log. This method is designed for use with remote storage backends
+     * like BookKeeper, where I/O operations are inherently asynchronous.
+     *
+     * <p>The default implementation wraps the synchronous append in a CompletableFuture.
+     * Subclasses that use remote storage (e.g., BookkeeperUnifiedLog) should override this method
+     * to perform truly asynchronous operations.
+     *
+     * @param records The records to append
+     * @param leaderEpoch The epoch of the replica appending
+     * @param origin Declares the origin of the append which affects required validations
+     * @param requestLocal request local instance
+     * @param verificationGuard verification guard for transaction verification
+     * @param transactionVersion the transaction version for the records
+     * @return A CompletableFuture that completes with the LogAppendInfo when the append is done
+     */
+    public CompletableFuture<LogAppendInfo> asyncAppend(
+            MemoryRecords records,
+            int leaderEpoch,
+            AppendOrigin origin,
+            RequestLocal requestLocal,
+            VerificationGuard verificationGuard,
+            short transactionVersion) {
+        // Default implementation: wrap synchronous append in a CompletableFuture
+        // Subclasses for remote storage (e.g., BookkeeperUnifiedLog) should override this
+        // to perform truly asynchronous operations
+        return CompletableFuture.supplyAsync(() ->
+            appendAsLeader(records, leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+        );
+    }
+
+    /**
+     * Asynchronously read records from the log. This method is designed for use with remote storage backends
+     * like BookKeeper, where I/O operations are inherently asynchronous.
+     *
+     * <p>The default implementation wraps the synchronous read in a CompletableFuture.
+     * Subclasses that use remote storage (e.g., BookkeeperUnifiedLog) should override this method
+     * to perform truly asynchronous operations.
+     *
+     * @param startOffset The offset to begin reading at
+     * @param maxLength The maximum number of bytes to read
+     * @param isolation The fetch isolation, which controls the maximum offset we are allowed to read
+     * @param minOneMessage If this is true, the first message will be returned even if it exceeds maxLength
+     * @return A CompletableFuture that completes with the FetchDataInfo when the read is done
+     */
+    public CompletableFuture<FetchDataInfo> asyncRead(
+            long startOffset,
+            int maxLength,
+            FetchIsolation isolation,
+            boolean minOneMessage) {
+        // Default implementation: wrap synchronous read in a CompletableFuture
+        // Subclasses for remote storage (e.g., BookkeeperUnifiedLog) should override this
+        // to perform truly asynchronous operations
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return read(startOffset, maxLength, isolation, minOneMessage);
+            } catch (IOException e) {
+                throw new KafkaStorageException("Error during async read from " + topicPartition(), e);
+            }
+        });
     }
 
     /**
