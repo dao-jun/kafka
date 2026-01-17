@@ -380,7 +380,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
     @Override
     public CompletableFuture<FetchDataInfo> readAsync(long startOffset, int maxLength, FetchIsolation isolation, boolean minOneMessage) {
         LogOffsetMetadata maxOffsetMetadata = switch (isolation) {
-            case LOG_END,HIGH_WATERMARK -> bookkeeperLocalLog.logEndOffsetMetadata();
+            case LOG_END, HIGH_WATERMARK -> bookkeeperLocalLog.logEndOffsetMetadata();
             case TXN_COMMITTED -> firstUnstableOffsetMetadata.orElse(bookkeeperLocalLog.logEndOffsetMetadata());
         };
         return bookkeeperLocalLog.readAsync(startOffset, maxLength, minOneMessage, maxOffsetMetadata, isolation == FetchIsolation.TXN_COMMITTED);
@@ -408,15 +408,20 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                         new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, bookkeeperLocalLog.logEndOffset(), Optional.empty())));
             }
             return bookkeeperLocalLog.readLatestRecordsAsync()
-                    .thenApply(records -> {
-                        Optional<RecordBatch> lastBatchOpt = records.lastBatch();
-                        if (lastBatchOpt.isEmpty()) {
-                            return new OffsetResultHolder(
-                                    new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, -1L, Optional.empty()));
-                        } else {
-                            RecordBatch lastBatch = lastBatchOpt.get();
-                            return new OffsetResultHolder(
-                                    new FileRecords.TimestampAndOffset(lastBatch.maxTimestamp(), lastBatch.lastOffset(), Optional.empty()));
+                    .thenApply(result -> {
+                        try {
+                            MemoryRecords records = result.records;
+                            Optional<RecordBatch> lastBatchOpt = records.lastBatch();
+                            if (lastBatchOpt.isEmpty()) {
+                                return new OffsetResultHolder(
+                                        new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, -1L, Optional.empty()));
+                            } else {
+                                RecordBatch lastBatch = lastBatchOpt.get();
+                                return new OffsetResultHolder(
+                                        new FileRecords.TimestampAndOffset(lastBatch.maxTimestamp(), lastBatch.lastOffset(), Optional.empty()));
+                            }
+                        } finally {
+                            result.release();
                         }
                     });
         } else {

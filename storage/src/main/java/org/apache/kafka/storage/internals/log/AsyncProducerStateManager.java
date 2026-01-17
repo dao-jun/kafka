@@ -180,7 +180,7 @@ public class AsyncProducerStateManager extends ProducerStateManager {
                 .thenAccept(opt -> {
                     if (opt.isEmpty()) {
                         log.info("No snapshot found for topic partition {}", topicPartition);
-                        future.completeExceptionally(Errors.UNKNOWN_TOPIC_OR_PARTITION.exception("Cannot load topic-partition ProducerSnapshot"));
+                        future.complete(null);
                         return;
                     }
                     byte[] snapshotData = opt.get().getValue();
@@ -189,7 +189,11 @@ public class AsyncProducerStateManager extends ProducerStateManager {
                         this.lastMapOffset = snapshot.lastMapOffset;
                         for (ProducerSnapshot.ProducerEntry entry : snapshot.producerEntries) {
                             OptionalLong currentTxnFirstOffsetVal = entry.currentTxnFirstOffset() >= 0 ? OptionalLong.of(entry.currentTxnFirstOffset()) : OptionalLong.empty();
-                            loadProducerEntry(new ProducerStateEntry(entry.producerId(), entry.epoch(), entry.coordinatorEpoch(), entry.timestamp(), currentTxnFirstOffsetVal));
+                            ProducerStateEntry stateEntry = new ProducerStateEntry(entry.producerId(), entry.epoch(), entry.coordinatorEpoch(), entry.timestamp(), currentTxnFirstOffsetVal);
+                            if (entry.lastOffset() > 0) {
+                                stateEntry.addBatch(entry.epoch(), entry.lastSequence(), entry.lastOffset(), entry.offsetDelta(), entry.timestamp());
+                            }
+                            loadProducerEntry(stateEntry);
                         }
                     } catch (Throwable t) {
                         log.error("Failed to deserialize snapshot", t);

@@ -294,9 +294,14 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     future.complete(null);
                     return;
                 }
+                EntriesDecodeResult result = null;
                 try {
-                    consumer.accept(KafkaEntryFormatter.decode(entries));
+                    result = KafkaEntryFormatter.decode(entries);
+                    consumer.accept(result.records);
                 } catch (Throwable t) {
+                    if (result != null) {
+                        result.release();
+                    }
                     future.completeExceptionally(t);
                     return;
                 }
@@ -346,8 +351,14 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                             : CompletableFuture.completedFuture(Collections.emptyList());
                 })
                 .thenApply(entries -> {
-                    FetchDataInfo fetchDataInfo = entries.isEmpty() ? FetchDataInfo.empty(startOffset)
-                            : new FetchDataInfo(new LogOffsetMetadata(startOffset), KafkaEntryFormatter.decode(entries));
+                    FetchDataInfo fetchDataInfo;
+                    if (entries.isEmpty()) {
+                        fetchDataInfo = FetchDataInfo.empty(startOffset);
+                    } else {
+                        // TODO release buffer after result sent to client.
+                        EntriesDecodeResult result = KafkaEntryFormatter.decode(entries);
+                        fetchDataInfo = new FetchDataInfo(new LogOffsetMetadata(startOffset), result.records);
+                    }
 
                     // Resolve aborted transactions
                     Optional<RecordBatch> lastBatch = fetchDataInfo.records.lastBatch();
@@ -428,12 +439,12 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         }
     }
 
-    public CompletableFuture<MemoryRecords> readLatestRecordsAsync() {
+    public CompletableFuture<EntriesDecodeResult> readLatestRecordsAsync() {
         Position lac = managedLedger.getLastConfirmedEntry();
         if (lac == null) {
-            return CompletableFuture.completedFuture(MemoryRecords.EMPTY);
+            return CompletableFuture.completedFuture(EntriesDecodeResult.EMPTY);
         }
-        CompletableFuture<MemoryRecords> future = new CompletableFuture<>();
+        CompletableFuture<EntriesDecodeResult> future = new CompletableFuture<>();
         managedLedger.asyncReadEntry(lac, new AsyncCallbacks.ReadEntryCallback() {
             @Override
             public void readEntryComplete(Entry entry, Object ctx) {
@@ -466,7 +477,7 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
             buf = KafkaEntryFormatter.encode(appendInfo, records);
             AtomicBoolean currentLedgerTimeoutTriggered = getCurrentLedgerTimeoutTriggered();
             MessagePublishContext ctx = new MessagePublishContext(future, (int) appendInfo.numMessages(), this);
-            OpAddEntry op = OpAddEntry.createNoRetainBuffer(managedLedger, buf, this, ctx, currentLedgerTimeoutTriggered);
+            OpAddEntry op = OpAddEntry.createNoRetainBuffer(managedLedger, buf.retain(), this, ctx, currentLedgerTimeoutTriggered);
             internalAsyncAddEntry.invoke(op);
             return future;
         } catch (Throwable e) {
