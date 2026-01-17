@@ -41,9 +41,9 @@ import org.apache.kafka.metadata.properties.{MetaProperties, MetaPropertiesEnsem
 import java.util.{Collections, Optional, OptionalLong, Properties}
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
-import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, LogManager => JLogManager}
+import org.apache.kafka.storage.internals.log.{AsyncProducerStateManager, AsyncTransactionIndex, CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetMetadata, LogOffsetsListener, LogSegments, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, LogManager => JLogManager}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
-import org.apache.kafka.storage.internals.log.bookkeeper.BookkeeperStorageSingleton
+import org.apache.kafka.storage.internals.log.bookkeeper.{BookkeeperLocalLog, BookkeeperStorageSingleton, BookkeeperUnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util
@@ -737,6 +737,17 @@ class LogManager(logDirs: Seq[File],
       dirLocks.foreach(_.destroy())
     }
 
+    // Close BookKeeper singleton if enabled
+    bookkeeperStorageSingleton.foreach { bkSingleton =>
+      try {
+        bkSingleton.close()
+        info("Closed BookkeeperStorageSingleton")
+      } catch {
+        case e: Exception =>
+          warn("Error closing BookkeeperStorageSingleton", e)
+      }
+    }
+
     info("Shutdown complete.")
   }
 
@@ -1081,23 +1092,52 @@ class LogManager(logDirs: Seq[File],
           .get // If Failure, will throw
 
         val config = fetchLogConfig(topicPartition.topic)
-        val log = UnifiedLog.create(
-          logDir,
-          config,
-          0L,
-          0L,
-          scheduler,
-          brokerTopicStats,
-          time,
-          maxTransactionTimeoutMs,
-          producerStateManagerConfig,
-          producerIdExpirationCheckIntervalMs,
-          logDirFailureChannel,
-          true,
-          topicId,
-          new ConcurrentHashMap[String, Integer](),
-          remoteStorageSystemEnable,
-          LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+        val log = if (asyncLogModeEnabled) {
+          // BookKeeper mode: create BookkeeperUnifiedLog
+          val bkSingleton = getBookkeeperStorageSingleton.getOrElse(
+            throw new IllegalStateException("BookkeeperStorageSingleton is not initialized but asyncLogMode is enabled"))
+          
+          val txnIndex = new AsyncTransactionIndex(bkSingleton.getMetadataStoreExtended, topicPartition)
+          val localLog = new BookkeeperLocalLog(
+            logDir, config, new LogSegments(topicPartition), 0L,
+            LogOffsetMetadata.UNKNOWN_OFFSET_METADATA, scheduler, time,
+            topicPartition, logDirFailureChannel, txnIndex)
+          
+          // Initialize ManagedLedger asynchronously and wait
+          localLog.initializeAsync(bkSingleton).join()
+          
+          val producerStateManager = new AsyncProducerStateManager(
+            topicPartition, maxTransactionTimeoutMs, producerStateManagerConfig,
+            time, bkSingleton.getMetadataStoreExtended)
+          
+          val bkLog = new BookkeeperUnifiedLog(
+            0L, localLog, brokerTopicStats, producerIdExpirationCheckIntervalMs,
+            null, producerStateManager, topicId, remoteStorageSystemEnable,
+            LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+          
+          // Recover Producer/Transaction state
+          bkLog.initialize().join()
+          bkLog
+        } else {
+          // Local file mode: use original UnifiedLog
+          UnifiedLog.create(
+            logDir,
+            config,
+            0L,
+            0L,
+            scheduler,
+            brokerTopicStats,
+            time,
+            maxTransactionTimeoutMs,
+            producerStateManagerConfig,
+            producerIdExpirationCheckIntervalMs,
+            logDirFailureChannel,
+            true,
+            topicId,
+            new ConcurrentHashMap[String, Integer](),
+            remoteStorageSystemEnable,
+            LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+        }
 
         if (isFuture)
           futureLogs.put(topicPartition, log)

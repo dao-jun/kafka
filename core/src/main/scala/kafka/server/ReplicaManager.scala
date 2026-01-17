@@ -1375,7 +1375,8 @@ class ReplicaManager(val config: KafkaConfig,
   private def delayedProduceRequestRequired(requiredAcks: Short,
                                             entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
                                             localProduceResults: Map[TopicIdPartition, LogAppendResult]): Boolean = {
-    if (config.logImplementationName.equals("ML")) {
+    // In async log mode (BookKeeper), ISR is managed by the storage provider, no need to wait for replication
+    if (logManager.asyncLogModeEnabled) {
       return false
     }
     requiredAcks == -1 &&
