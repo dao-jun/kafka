@@ -33,6 +33,7 @@ import org.apache.bookkeeper.mledger.impl.OpAddEntry;
 import org.apache.commons.lang3.RandomUtils;
 import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
@@ -45,26 +46,25 @@ import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LocalLog;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
 import org.apache.kafka.storage.internals.log.LogConfig;
-import org.apache.kafka.storage.internals.log.LogDirFailureChannel;
 import org.apache.kafka.storage.internals.log.LogOffsetMetadata;
 import org.apache.kafka.storage.internals.log.LogSegment;
 import org.apache.kafka.storage.internals.log.LogSegments;
 import org.apache.kafka.storage.internals.log.OffsetAndTimestampIndex;
 import org.apache.kafka.storage.internals.log.TxnIndexSearchResult;
+import org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -74,54 +74,68 @@ import java.util.function.Consumer;
 
 public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEntryCallback, AsyncCallbacks.OpenLedgerCallback {
     private static final Logger log = LoggerFactory.getLogger(BookkeeperLocalLog.class);
+    private static final File DIR = new File("/tmp");
+    private static final String UUID_KEY = "topic.uuid";
 
     private volatile ManagedLedgerImpl managedLedger;
     private volatile Field currentLedgerTimeoutTriggered;
-    private volatile MethodHandle internalAsyncAddEntry;
+    private volatile Method internalAsyncAddEntry;
     private volatile boolean isFenced = false;
     // The Transaction max position is the last position that the read-committed read can read.
     private volatile Position txnMaxPosition = PositionFactory.EARLIEST;
     protected volatile Executor mlExecutor;
     protected volatile OffsetAndTimestampIndex index;
+    protected volatile long logStartOffset;
 
     private final ManagedLedgerConfig managedLedgerConfig;
     private final Time time = Time.SYSTEM;
     private final AtomicInteger pendingAddEntries = new AtomicInteger();
     protected final AsyncTransactionIndex txnIndex;
 
-    private final CompletableFuture<Void> initializeFuture = new CompletableFuture<>();
+    private final CompletableFuture<Long> initializeFuture = new CompletableFuture<>();
     private final AtomicBoolean initialized = new AtomicBoolean(false);
 
     /**
-     * @param dir                  The directory in which log segments are created.
-     * @param config               The log configuration settings
-     * @param segments             The non-empty log segments recovered from disk
-     * @param recoveryPoint        The offset at which to begin the next recovery i.e. the first offset which has not been flushed to disk
-     * @param nextOffsetMetadata   The offset where the next message could be appended
-     * @param scheduler            The thread pool scheduler used for background actions
-     * @param time                 The time instance used for checking the clock
-     * @param topicPartition       The topic partition associated with this log
-     * @param logDirFailureChannel The LogDirFailureChannel instance to asynchronously handle Log dir failure
+     * @param config         The log configuration settings
+     * @param scheduler      The thread pool scheduler used for background actions
+     * @param topicPartition The topic partition associated with this log
      */
-    public BookkeeperLocalLog(File dir, LogConfig config, LogSegments segments, long recoveryPoint,
-                              LogOffsetMetadata nextOffsetMetadata, Scheduler scheduler, Time time,
-                              TopicPartition topicPartition, LogDirFailureChannel logDirFailureChannel,
-                              AsyncTransactionIndex txnIndex) {
-        super(dir, config, segments, recoveryPoint, nextOffsetMetadata, scheduler, time, topicPartition, logDirFailureChannel);
+    public BookkeeperLocalLog(LogConfig config, Scheduler scheduler, TopicPartition topicPartition, AsyncTransactionIndex txnIndex) {
+        super(DIR, config, new LogSegments(topicPartition), -1L, new LogOffsetMetadata(0L), scheduler, Time.SYSTEM, topicPartition, null);
         this.managedLedgerConfig = buildManagedLedgerConfig(config);
         this.txnIndex = txnIndex;
+    }
+
+    public Optional<Uuid> getTopicId() {
+        String topicId = managedLedger.getProperties().get(UUID_KEY);
+        return topicId == null ? Optional.empty() : Optional.of(Uuid.fromString(topicId));
+    }
+
+    public void assignTopicId(Uuid topicId) {
+        managedLedger.getProperties().put(UUID_KEY, topicId.toString());
     }
 
     @Override
     public void openLedgerComplete(ManagedLedger ledger, Object ctx) {
         this.managedLedger = (ManagedLedgerImpl) ledger;
         try {
-            this.internalAsyncAddEntry = MethodHandles.lookup().bind(managedLedger, "internalAsyncAddEntry", MethodType.methodType(Void.class, OpAddEntry.class));
+            Class<ManagedLedgerImpl> clazz = ManagedLedgerImpl.class;
+            this.internalAsyncAddEntry = clazz.getDeclaredMethod("internalAsyncAddEntry", OpAddEntry.class);
+            internalAsyncAddEntry.setAccessible(true);
             this.currentLedgerTimeoutTriggered = ManagedLedgerImpl.class.getDeclaredField("currentLedgerTimeoutTriggered");
             this.currentLedgerTimeoutTriggered.setAccessible(true);
             this.index = new OffsetAndTimestampIndex(managedLedger, topicPartition);
             this.mlExecutor = managedLedger.getExecutor();
-            initializeFuture.complete(null);
+            asyncGetLogStartOffset()
+                    .thenAccept(start -> {
+                        this.logStartOffset = start;
+                        initializeFuture.complete(start);
+                    })
+                    .exceptionally(t -> {
+                        log.error("Failed to get log start offset", t);
+                        initializeFuture.completeExceptionally(Errors.KAFKA_STORAGE_ERROR.exception());
+                        return null;
+                    });
         } catch (Throwable t) {
             log.error("Failed to initialize BookkeeperLocalLog", t);
             initializeFuture.completeExceptionally(t);
@@ -134,14 +148,14 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         initializeFuture.completeExceptionally(exception);
     }
 
-    public CompletableFuture<Void> initializeAsync(BookkeeperStorageSingleton bookkeeperStorageSingleton) {
+    public CompletableFuture<Long> initializeAsync(ManagedLedgerFactory managedLedgerFactory) {
         if (!initialized.compareAndSet(false, true)) {
             return initializeFuture;
         }
 
         String ledgerName = topicPartition.toString();
-        ManagedLedgerFactory factory = bookkeeperStorageSingleton.getManagedLedgerFactory();
-        factory.asyncOpen(ledgerName, managedLedgerConfig, this, () -> CompletableFuture.completedFuture(true), null);
+        managedLedgerFactory.asyncOpen(ledgerName, managedLedgerConfig, this, () -> CompletableFuture.completedFuture(true), null);
+        this.initializeFuture.thenAccept(__ -> updateLogEndOffset(getLogEndOffset(managedLedger)));
         return this.initializeFuture;
     }
 
@@ -196,6 +210,8 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         ledgerConfig.setLedgerForceRecovery(config.ledgerForceRecovery);
         ledgerConfig.setInactiveLedgerRollOverTime(config.inactiveLedgerRolloverTimeSeconds, TimeUnit.SECONDS);
         ledgerConfig.setLazyCursorRecovery(true);
+        ledgerConfig.setManagedLedgerInterceptor(
+                new ManagedLedgerInterceptorImpl(Set.of(new AppendIndexMetadataInterceptor())));
         return ledgerConfig;
     }
 
@@ -208,6 +224,15 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
     @Override
     public long logEndOffset() {
         return getLogEndOffset(managedLedger);
+    }
+
+    public long logStartOffset() {
+        return logStartOffset;
+    }
+
+    @Override
+    public void updateLogEndOffset(long endOffset) {
+        this.nextOffsetMetadata = new LogOffsetMetadata(endOffset);
     }
 
     @Override
@@ -294,10 +319,10 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     future.complete(null);
                     return;
                 }
-                EntriesDecodeResult result = null;
+                RecordsDecodeResult result = null;
                 try {
                     result = KafkaEntryFormatter.decode(entries);
-                    consumer.accept(result.records);
+                    consumer.accept(result.records());
                 } catch (Throwable t) {
                     if (result != null) {
                         result.release();
@@ -343,7 +368,13 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                         return CompletableFuture.completedFuture(Collections.emptyList());
                     }
                     mutablePosition.setValue(position);
-                    int maxEntries = (int) (maxLength / managedLedger.getStats().getEntrySizeAverage());
+                    double entrySizeAverage = managedLedger.getStats().getEntrySizeAverage();
+                    int maxEntries;
+                    if (Double.isNaN(entrySizeAverage)) {
+                        maxEntries = 10;
+                    } else {
+                        maxEntries = (int) (maxLength / entrySizeAverage);
+                    }
                     if (maxEntries <= 0 && minOneMessage) {
                         maxEntries = 1;
                     }
@@ -356,8 +387,8 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                         fetchDataInfo = FetchDataInfo.empty(startOffset);
                     } else {
                         // TODO release buffer after result sent to client.
-                        EntriesDecodeResult result = KafkaEntryFormatter.decode(entries);
-                        fetchDataInfo = new FetchDataInfo(new LogOffsetMetadata(startOffset), result.records);
+                        RecordsDecodeResult result = KafkaEntryFormatter.decode(entries);
+                        fetchDataInfo = new FetchDataInfo(new LogOffsetMetadata(startOffset), result.records());
                     }
 
                     // Resolve aborted transactions
@@ -439,12 +470,12 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         }
     }
 
-    public CompletableFuture<EntriesDecodeResult> readLatestRecordsAsync() {
+    public CompletableFuture<RecordsDecodeResult> readLatestRecordsAsync() {
         Position lac = managedLedger.getLastConfirmedEntry();
         if (lac == null) {
-            return CompletableFuture.completedFuture(EntriesDecodeResult.EMPTY);
+            return CompletableFuture.completedFuture(RecordsDecodeResult.EMPTY);
         }
-        CompletableFuture<EntriesDecodeResult> future = new CompletableFuture<>();
+        CompletableFuture<RecordsDecodeResult> future = new CompletableFuture<>();
         managedLedger.asyncReadEntry(lac, new AsyncCallbacks.ReadEntryCallback() {
             @Override
             public void readEntryComplete(Entry entry, Object ctx) {
@@ -476,9 +507,10 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         try {
             buf = KafkaEntryFormatter.encode(appendInfo, records);
             AtomicBoolean currentLedgerTimeoutTriggered = getCurrentLedgerTimeoutTriggered();
-            MessagePublishContext ctx = new MessagePublishContext(future, (int) appendInfo.numMessages(), this);
-            OpAddEntry op = OpAddEntry.createNoRetainBuffer(managedLedger, buf.retain(), this, ctx, currentLedgerTimeoutTriggered);
-            internalAsyncAddEntry.invoke(op);
+            int numMessages = (int) appendInfo.numMessages();
+            MessagePublishContext ctx = new MessagePublishContext(future, numMessages, this);
+            OpAddEntry op = OpAddEntry.createNoRetainBuffer(managedLedger, buf.retain(), numMessages, this, ctx, currentLedgerTimeoutTriggered);
+            internalAsyncAddEntry.invoke(managedLedger, op);
             return future;
         } catch (Throwable e) {
             log.error("Failed to invoke internalAsyncAddEntry", e);

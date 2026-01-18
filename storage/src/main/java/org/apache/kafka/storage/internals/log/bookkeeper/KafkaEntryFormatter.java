@@ -46,7 +46,7 @@ public class KafkaEntryFormatter {
         return serializeMetadataAndPayload(CHECKSUM_TYPE, metadata, payload);
     }
 
-    public static EntriesDecodeResult decode(List<Entry> entries) {
+    public static RecordsDecodeResult decode(List<Entry> entries) {
         int totalSize = 0;
         int numberOfMessages = 0;
         // batched ByteBuf should be released after sending to client
@@ -76,12 +76,13 @@ public class KafkaEntryFormatter {
             }
         }
 
-        return new EntriesDecodeResult(batchedByteBuf, numberOfMessages, MemoryRecords.readableRecords(batchedByteBuf.nioBuffer()));
+        return new RecordsDecodeResult(batchedByteBuf, numberOfMessages, MemoryRecords.readableRecords(batchedByteBuf.nioBuffer()));
     }
 
     public static MessageMetadata metadata(long numberOfMessages, MemoryRecords records) {
         MessageMetadata metadata = new MessageMetadata();
         metadata.setNumMessagesInBatch((int) numberOfMessages);
+        metadata.setProducerName("1").setSequenceId(0L).setPublishTime(System.currentTimeMillis());
         return metadata;
     }
 

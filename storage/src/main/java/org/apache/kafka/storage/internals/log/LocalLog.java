@@ -85,7 +85,7 @@ public class LocalLog {
     private final LogDirFailureChannel logDirFailureChannel;
     private final Logger logger;
 
-    private volatile LogOffsetMetadata nextOffsetMetadata;
+    protected volatile LogOffsetMetadata nextOffsetMetadata;
     // The memory mapped buffer for index files of this log will be closed with either delete() or closeHandlers()
     // After memory mapped buffer is closed, no disk IO operation should be performed for this log.
     private volatile boolean isMemoryMappedBufferClosed = false;

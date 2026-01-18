@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.log.bookkeeper;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.FileRecords;
@@ -65,8 +66,7 @@ import java.util.function.Consumer;
 
 public class BookkeeperUnifiedLog extends UnifiedLog {
     private static final Logger log = LoggerFactory.getLogger(BookkeeperUnifiedLog.class);
-    private final BookkeeperLocalLog bookkeeperLocalLog;
-    private final AsyncProducerStateManager producerStateManager;
+    private volatile BookkeeperLocalLog bookkeeperLocalLog;
     private final AtomicBoolean recovering = new AtomicBoolean(false);
     private final CompletableFuture<Void> initializeFuture = new CompletableFuture<>();
 
@@ -77,13 +77,13 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                                 boolean remoteStorageSystemEnable, LogOffsetsListener logOffsetsListener) throws IOException {
         super(logStartOffset, localLog, brokerTopicStats, producerIdExpirationCheckIntervalMs, leaderEpochCache,
                 producerStateManager, topicId, remoteStorageSystemEnable, logOffsetsListener);
-        this.bookkeeperLocalLog = localLog;
-        this.producerStateManager = producerStateManager;
     }
 
     @Override
     protected void initializePartitionMetadata() {
-        // noop
+        if (bookkeeperLocalLog == null) {
+            bookkeeperLocalLog = (BookkeeperLocalLog) localLog;
+        }
     }
 
     @Override
@@ -98,17 +98,42 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @Override
     protected void initializeTopicId() {
-        // TODO
+        Optional<Uuid> uuidOpt = bookkeeperLocalLog.getTopicId();
+        if (uuidOpt.isPresent() && topicId.isPresent()) {
+            if (!uuidOpt.get().equals(topicId.orElse(Uuid.ZERO_UUID))) {
+                throw new InconsistentTopicIdException("Tried to assign topic ID " + topicId + " to log for topic partition " + topicPartition() + "," +
+                        "but log already contained topic ID " + uuidOpt.get());
+            }
+        } else if (topicId.isEmpty() && uuidOpt.isPresent()) {
+            topicId = uuidOpt;
+        } else if (topicId.isPresent() && uuidOpt.isEmpty()) {
+            bookkeeperLocalLog.assignTopicId(topicId.orElse(Uuid.ZERO_UUID));
+        }
     }
 
     @Override
-    public int deleteOldSegments() throws IOException {
-        return 0;
+    public void assignTopicId(Uuid topicId) {
+        if (this.topicId.isPresent()) {
+            Uuid currentId = this.topicId.get();
+            if (!currentId.equals(topicId)) {
+                throw new InconsistentTopicIdException("Tried to assign topic ID " + topicId + " to log for topic partition " + topicPartition() +
+                        ", but log already contained topic ID " + currentId);
+            }
+        } else {
+            this.topicId = Optional.of(topicId);
+            bookkeeperLocalLog.assignTopicId(topicId);
+        }
     }
+
 
     @Override
     public long highWatermark() {
         return bookkeeperLocalLog.logEndOffset();
+    }
+
+    @Override
+    public void assignEpochStartOffset(int leaderEpoch, long startOffset) {
+
     }
 
     public CompletableFuture<Void> initialize() {
@@ -116,7 +141,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
             return initializeFuture;
         }
 
-        CompletableFuture<Void> producerRecoverFuture = producerStateManager.recoverSnapshotAsync();
+        CompletableFuture<Void> producerRecoverFuture = ((AsyncProducerStateManager) producerStateManager).recoverSnapshotAsync();
         CompletableFuture<Void> transactionRecoverFuture = bookkeeperLocalLog.txnIndex.recoverSnapshot();
         CompletableFuture.allOf(producerRecoverFuture, transactionRecoverFuture)
                 .thenCompose(ignore -> {
@@ -125,8 +150,8 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                     if (transactionMapEndOffset < producerMapEndOffset) {
                         // TODO
                         log.warn("Transaction map end offset {} is less than producer map end offset {}, " +
-                                "which means that some transactions may be missing. " +
-                                "This can happen when the transaction log is truncated before the producer state log.",
+                                        "which means that some transactions may be missing. " +
+                                        "This can happen when the transaction log is truncated before the producer state log.",
                                 transactionMapEndOffset, producerMapEndOffset);
                     }
                     long currentOffset = bookkeeperLocalLog.logEndOffset();
@@ -208,139 +233,143 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                                                         boolean ignoreRecordSize, byte toMagic, short transactionVersion) {
         CompletableFuture<LogAppendInfo> future = new CompletableFuture<>();
         this.bookkeeperLocalLog.mlExecutor.execute(() -> {
-            LogAppendInfo appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize, !validateAndAssignOffsets, leaderEpoch);
-            if (appendInfo.validBytes() <= 0) {
-                future.complete(appendInfo);
-                return;
-            }
-            MemoryRecords trimmedRecords = trimInvalidBytes(records, appendInfo);
-            if (validateAndAssignOffsets) {
-                PrimitiveRef.LongRef offset = PrimitiveRef.ofLong(bookkeeperLocalLog.logEndOffset());
-                appendInfo.setFirstOffset(offset.value);
-                Compression targetCompression = BrokerCompressionType.targetCompression(config().compression, appendInfo.sourceCompression());
-                LogValidator validator = new LogValidator(trimmedRecords,
-                        topicPartition(),
-                        time(),
-                        appendInfo.sourceCompression(),
-                        targetCompression,
-                        config().compact,
-                        toMagic,
-                        config().messageTimestampType,
-                        config().messageTimestampBeforeMaxMs,
-                        config().messageTimestampAfterMaxMs,
-                        leaderEpoch,
-                        origin);
-                if (requestLocal.isEmpty()) {
-                    future.completeExceptionally(new IllegalArgumentException("requestLocal should be defined if assignOffsets is true"));
+            try {
+                LogAppendInfo appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize, !validateAndAssignOffsets, leaderEpoch);
+                if (appendInfo.validBytes() <= 0) {
+                    future.complete(appendInfo);
                     return;
                 }
-                LogValidator.ValidationResult validateAndOffsetAssignResult = validator.validateMessagesAndAssignOffsets(offset,
-                        validatorMetricsRecorder, requestLocal.get().bufferSupplier());
-                trimmedRecords = validateAndOffsetAssignResult.validatedRecords();
-                appendInfo.setMaxTimestamp(validateAndOffsetAssignResult.maxTimestampMs());
-                appendInfo.setLastOffset(offset.value - 1);
-                appendInfo.setRecordValidationStats(validateAndOffsetAssignResult.recordValidationStats());
-                if (config().messageTimestampType == TimestampType.LOG_APPEND_TIME) {
-                    appendInfo.setLogAppendTime(validateAndOffsetAssignResult.logAppendTimeMs());
-                }
-                if (!ignoreRecordSize && validateAndOffsetAssignResult.messageSizeMaybeChanged()) {
-                    for (RecordBatch batch : trimmedRecords.batches()) {
-                        if (batch.sizeInBytes() > config().maxMessageSize()) {
-                            future.completeExceptionally(new RecordTooLargeException(
-                                    "Message batch exceeds the maximum configured message size."));
-                            return;
-                        }
+                MemoryRecords trimmedRecords = trimInvalidBytes(records, appendInfo);
+                if (validateAndAssignOffsets) {
+                    PrimitiveRef.LongRef offset = PrimitiveRef.ofLong(bookkeeperLocalLog.logEndOffset());
+                    appendInfo.setFirstOffset(offset.value);
+                    Compression targetCompression = BrokerCompressionType.targetCompression(config().compression, appendInfo.sourceCompression());
+                    LogValidator validator = new LogValidator(trimmedRecords,
+                            topicPartition(),
+                            time(),
+                            appendInfo.sourceCompression(),
+                            targetCompression,
+                            config().compact,
+                            toMagic,
+                            config().messageTimestampType,
+                            config().messageTimestampBeforeMaxMs,
+                            config().messageTimestampAfterMaxMs,
+                            leaderEpoch,
+                            origin);
+                    if (requestLocal.isEmpty()) {
+                        future.completeExceptionally(new IllegalArgumentException("requestLocal should be defined if assignOffsets is true"));
+                        return;
                     }
-                }
-            } else {
-                if (appendInfo.firstOrLastOffsetOfFirstBatch() < logEndOffset()) {
-                    // we may still be able to recover if the log is empty
-                    // one example: fetching from log start offset on the leader which is not batch aligned,
-                    // which may happen as a result of AdminClient#deleteRecords()
-                    boolean hasFirstOffset = appendInfo.firstOffset() != UnifiedLog.UNKNOWN_OFFSET;
-                    long firstOffset = hasFirstOffset ? appendInfo.firstOffset() : records.batches().iterator().next().baseOffset();
-
-                    String firstOrLast = hasFirstOffset ? "First offset" : "Last offset of the first batch";
-                    List<String> offsets = new ArrayList<>();
-                    for (Record record : records.records()) {
-                        offsets.add(String.valueOf(record.offset()));
-                        if (offsets.size() == 10) break;
+                    LogValidator.ValidationResult validateAndOffsetAssignResult = validator.validateMessagesAndAssignOffsets(offset,
+                            validatorMetricsRecorder, requestLocal.get().bufferSupplier());
+                    trimmedRecords = validateAndOffsetAssignResult.validatedRecords();
+                    appendInfo.setMaxTimestamp(validateAndOffsetAssignResult.maxTimestampMs());
+                    appendInfo.setLastOffset(offset.value - 1);
+                    appendInfo.setRecordValidationStats(validateAndOffsetAssignResult.recordValidationStats());
+                    if (config().messageTimestampType == TimestampType.LOG_APPEND_TIME) {
+                        appendInfo.setLogAppendTime(validateAndOffsetAssignResult.logAppendTimeMs());
                     }
-                    // TODO
-                    long logStartOffset = 0;
-                    future.completeExceptionally(new UnexpectedAppendOffsetException(
-                            "Unexpected offset in append to " + topicPartition() + ". " + firstOrLast + " " +
-                                    appendInfo.firstOrLastOffsetOfFirstBatch() + " is less than the next offset " + logEndOffset() + ". " +
-                                    "First 10 offsets in append: " + String.join(", ", offsets) + ", last offset in" +
-                                    " append: " + appendInfo.lastOffset() + ". Log start offset = " + logStartOffset,
-                            firstOffset, appendInfo.lastOffset()));
-                    return;
-                }
-            }
-
-            // update the epoch cache with the epoch stamped onto the message by the leader
-            trimmedRecords.batches().forEach(batch -> {
-                if (batch.magic() >= RecordBatch.MAGIC_VALUE_V2) {
-                    assignEpochStartOffset(batch.partitionLeaderEpoch(), batch.baseOffset());
-                } else {
-                    // In partial upgrade scenarios, we may get a temporary regression to the message format. In
-                    // order to ensure the safety of leader election, we clear the epoch cache so that we revert
-                    // to truncation by high watermark after the next leader election.
-                    // TODO
-                    // if (leaderEpochCache.nonEmpty()) {
-                    //    logger.warn("Clearing leader epoch cache after unexpected append with message format v{}", batch.magic());
-                    //  leaderEpochCache.clearAndFlush();
-                    // }
-                }
-            });
-
-            // check messages size does not exceed config.segmentSize
-            if (trimmedRecords.sizeInBytes() > config().segmentSize()) {
-                future.completeExceptionally(Errors.RECORD_LIST_TOO_LARGE.exception("Message batch size is " + trimmedRecords.sizeInBytes() + " bytes in append " +
-                        "to partition " + topicPartition() + ", which exceeds the maximum configured segment size of " + config().segmentSize() + "."));
-                return;
-            }
-
-            LogOffsetMetadata logOffsetMetadata = new LogOffsetMetadata(appendInfo.firstOrLastOffsetOfFirstBatch(), 0, 1);
-            // now that we have valid records, offsets assigned, and timestamps updated, we need to
-            // validate the idempotent/transactional state of the producers and collect some metadata
-            AnalyzeAndValidateProducerStateResult result = analyzeAndValidateProducerState(
-                    logOffsetMetadata, trimmedRecords, origin, verificationGuard, transactionVersion
-            );
-
-
-            if (result.maybeDuplicate().isPresent()) {
-                BatchMetadata duplicate = result.maybeDuplicate().get();
-                appendInfo.setFirstOffset(duplicate.firstOffset());
-                appendInfo.setLastOffset(duplicate.lastOffset());
-                appendInfo.setLogAppendTime(duplicate.timestamp());
-                // TODO
-                // appendInfo.setLogStartOffset(logStartOffset);
-                future.complete(appendInfo);
-                return;
-            }
-
-            bookkeeperLocalLog.appendAsync(appendInfo, trimmedRecords)
-                    .thenAccept(offset -> {
-                        // Should run on ML executor
-                        result.updatedProducers().values().forEach(producerStateManager::update);
-                        for (CompletedTxn completedTxn : result.completedTxns()) {
-                            long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
-                            if (completedTxn.isAborted()) {
-                                bookkeeperLocalLog.txnIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                    if (!ignoreRecordSize && validateAndOffsetAssignResult.messageSizeMaybeChanged()) {
+                        for (RecordBatch batch : trimmedRecords.batches()) {
+                            if (batch.sizeInBytes() > config().maxMessageSize()) {
+                                future.completeExceptionally(new RecordTooLargeException(
+                                        "Message batch exceeds the maximum configured message size."));
+                                return;
                             }
-                            producerStateManager.completeTxn(completedTxn);
                         }
-                        long mapEndOffset = appendInfo.lastOffset() + 1;
-                        bookkeeperLocalLog.txnIndex.updateMapEndOffset(mapEndOffset);
-                        producerStateManager.updateMapEndOffset(mapEndOffset);
-                        maybeIncrementFirstUnstableOffset();
-                        future.complete(appendInfo);
-                    })
-                    .exceptionally(t -> {
-                        future.completeExceptionally(t);
-                        return null;
-                    });
+                    }
+                } else {
+                    if (appendInfo.firstOrLastOffsetOfFirstBatch() < logEndOffset()) {
+                        // we may still be able to recover if the log is empty
+                        // one example: fetching from log start offset on the leader which is not batch aligned,
+                        // which may happen as a result of AdminClient#deleteRecords()
+                        boolean hasFirstOffset = appendInfo.firstOffset() != UnifiedLog.UNKNOWN_OFFSET;
+                        long firstOffset = hasFirstOffset ? appendInfo.firstOffset() : records.batches().iterator().next().baseOffset();
+
+                        String firstOrLast = hasFirstOffset ? "First offset" : "Last offset of the first batch";
+                        List<String> offsets = new ArrayList<>();
+                        for (Record record : records.records()) {
+                            offsets.add(String.valueOf(record.offset()));
+                            if (offsets.size() == 10) break;
+                        }
+                        future.completeExceptionally(new UnexpectedAppendOffsetException(
+                                "Unexpected offset in append to " + topicPartition() + ". " + firstOrLast + " " +
+                                        appendInfo.firstOrLastOffsetOfFirstBatch() + " is less than the next offset " + logEndOffset() + ". " +
+                                        "First 10 offsets in append: " + String.join(", ", offsets) + ", last offset in" +
+                                        " append: " + appendInfo.lastOffset() + ". Log start offset = " + logStartOffset,
+                                firstOffset, appendInfo.lastOffset()));
+                        return;
+                    }
+                }
+
+                // update the epoch cache with the epoch stamped onto the message by the leader
+                trimmedRecords.batches().forEach(batch -> {
+                    if (batch.magic() >= RecordBatch.MAGIC_VALUE_V2) {
+                        assignEpochStartOffset(batch.partitionLeaderEpoch(), batch.baseOffset());
+                    } else {
+                        // In partial upgrade scenarios, we may get a temporary regression to the message format. In
+                        // order to ensure the safety of leader election, we clear the epoch cache so that we revert
+                        // to truncation by high watermark after the next leader election.
+                        // TODO
+                        // if (leaderEpochCache.nonEmpty()) {
+                        //    logger.warn("Clearing leader epoch cache after unexpected append with message format v{}", batch.magic());
+                        //  leaderEpochCache.clearAndFlush();
+                        // }
+                    }
+                });
+
+                // check messages size does not exceed config.segmentSize
+                if (trimmedRecords.sizeInBytes() > config().segmentSize()) {
+                    future.completeExceptionally(Errors.RECORD_LIST_TOO_LARGE.exception("Message batch size is " + trimmedRecords.sizeInBytes() + " bytes in append " +
+                            "to partition " + topicPartition() + ", which exceeds the maximum configured segment size of " + config().segmentSize() + "."));
+                    return;
+                }
+
+                LogOffsetMetadata logOffsetMetadata = new LogOffsetMetadata(appendInfo.firstOrLastOffsetOfFirstBatch(), 0, 1);
+                // now that we have valid records, offsets assigned, and timestamps updated, we need to
+                // validate the idempotent/transactional state of the producers and collect some metadata
+                AnalyzeAndValidateProducerStateResult result = analyzeAndValidateProducerState(
+                        logOffsetMetadata, trimmedRecords, origin, verificationGuard, transactionVersion
+                );
+
+
+                if (result.maybeDuplicate().isPresent()) {
+                    BatchMetadata duplicate = result.maybeDuplicate().get();
+                    appendInfo.setFirstOffset(duplicate.firstOffset());
+                    appendInfo.setLastOffset(duplicate.lastOffset());
+                    appendInfo.setLogAppendTime(duplicate.timestamp());
+                    appendInfo.setLogStartOffset(logStartOffset);
+                    future.complete(appendInfo);
+                    return;
+                }
+
+                bookkeeperLocalLog.appendAsync(appendInfo, trimmedRecords)
+                        .thenAccept(offset -> {
+                            // Should run on ML executor
+                            result.updatedProducers().values().forEach(producerStateManager::update);
+                            for (CompletedTxn completedTxn : result.completedTxns()) {
+                                long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
+                                if (completedTxn.isAborted()) {
+                                    bookkeeperLocalLog.txnIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                                }
+                                producerStateManager.completeTxn(completedTxn);
+                            }
+                            long mapEndOffset = appendInfo.lastOffset() + 1;
+                            bookkeeperLocalLog.txnIndex.updateMapEndOffset(mapEndOffset);
+                            producerStateManager.updateMapEndOffset(mapEndOffset);
+                            maybeIncrementFirstUnstableOffset();
+                            // Update the log end offset
+                            bookkeeperLocalLog.updateLogEndOffset(appendInfo.lastOffset());
+                            future.complete(appendInfo);
+                        })
+                        .exceptionally(t -> {
+                            future.completeExceptionally(t);
+                            return null;
+                        });
+            } catch (Throwable t) {
+                log.error("Failed to append records", t);
+                future.completeExceptionally(Errors.forException(t).exception());
+            }
         });
 
         return future;
@@ -348,12 +377,12 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @Override
     public long logStartOffset() {
-        return localLogStartOffset();
+        return bookkeeperLocalLog.logStartOffset;
     }
 
     @Override
     public long localLogStartOffset() {
-        return bookkeeperLocalLog.asyncGetLogStartOffset().join();
+        return bookkeeperLocalLog.logStartOffset;
     }
 
     @Override
@@ -410,7 +439,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
             return bookkeeperLocalLog.readLatestRecordsAsync()
                     .thenApply(result -> {
                         try {
-                            MemoryRecords records = result.records;
+                            MemoryRecords records = result.records();
                             Optional<RecordBatch> lastBatchOpt = records.lastBatch();
                             if (lastBatchOpt.isEmpty()) {
                                 return new OffsetResultHolder(

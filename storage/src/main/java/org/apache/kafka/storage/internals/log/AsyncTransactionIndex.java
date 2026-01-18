@@ -44,8 +44,8 @@ public class AsyncTransactionIndex {
     private static final Logger log = LoggerFactory.getLogger(AsyncTransactionIndex.class);
 
     private OptionalLong lastOffset = OptionalLong.empty();
-    private volatile long lastSnapshotOffset = -1;
-    private volatile long mapEndOffset = -1;
+    private volatile long lastSnapshotOffset = 0;
+    private volatile long mapEndOffset = 0;
     private final MetadataStoreExtended metadataStore;
     private final TopicPartition tp;
     private final ConcurrentSkipListMap<Long, AbortedTxn> index;

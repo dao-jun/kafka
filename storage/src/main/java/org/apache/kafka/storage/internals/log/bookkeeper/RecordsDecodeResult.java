@@ -20,22 +20,11 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.apache.kafka.common.record.MemoryRecords;
 
-public final class EntriesDecodeResult {
-    private final static ByteBuf EMPTY_BUF = Unpooled.EMPTY_BUFFER;
-
-    public final ByteBuf buf;
-    public final int numEntries;
-    public final MemoryRecords records;
-
-    public EntriesDecodeResult(ByteBuf buf, int numEntries, MemoryRecords records) {
-        this.buf = buf;
-        this.numEntries = numEntries;
-        this.records = records;
-    }
+public record RecordsDecodeResult(ByteBuf buf, int numEntries, MemoryRecords records) {
+    private static final ByteBuf EMPTY_BUF = Unpooled.EMPTY_BUFFER;
+    public static final RecordsDecodeResult EMPTY = new RecordsDecodeResult(EMPTY_BUF, 0, MemoryRecords.EMPTY);
 
     public void release() {
         buf.release();
     }
-
-    public static final EntriesDecodeResult EMPTY = new EntriesDecodeResult(EMPTY_BUF, 0, MemoryRecords.EMPTY);
 }

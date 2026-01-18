@@ -125,9 +125,9 @@ public class UnifiedLog implements AutoCloseable {
     private final Map<String, Map<String, String>> metricNames = new HashMap<>();
 
     // localLog The LocalLog instance containing non-empty log segments recovered from disk
-    private final LocalLog localLog;
+    protected final LocalLog localLog;
     private final BrokerTopicStats brokerTopicStats;
-    private final ProducerStateManager producerStateManager;
+    protected final ProducerStateManager producerStateManager;
     private final boolean remoteStorageSystemEnable;
     private final ScheduledFuture<?> producerExpireCheck;
     private final int producerIdExpirationCheckIntervalMs;
@@ -159,9 +159,9 @@ public class UnifiedLog implements AutoCloseable {
      */
     private volatile LogOffsetMetadata highWatermarkMetadata;
     private volatile long localLogStartOffset;
-    private volatile long logStartOffset;
+    protected volatile long logStartOffset;
     private volatile LeaderEpochFileCache leaderEpochCache;
-    private volatile Optional<Uuid> topicId;
+    protected volatile Optional<Uuid> topicId;
     private volatile LogOffsetsListener logOffsetsListener;
 
     /**
