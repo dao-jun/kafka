@@ -80,7 +80,7 @@ public class BookkeeperUnifiedLogBasicTest extends MockedBookKeeperTestCase {
         CountDownLatch latch = new CountDownLatch(10);
         for (int i = 0; i < 10; i++) {
             SimpleRecord record = new SimpleRecord(Time.SYSTEM.milliseconds(), ("key_" + i).getBytes(), ("value_" + i).getBytes());
-            bookkeeperUnifiedLog.appendAsLeaderAsync(MemoryRecords.withRecords(Compression.NONE, record),
+            bookkeeperUnifiedLog.appendAsLeaderAsync(MemoryRecords.withIdempotentRecords(Compression.NONE, 1, (short) 0, i, record),
                     0, AppendOrigin.CLIENT, RequestLocal.noCaching(), VerificationGuard.SENTINEL,
                     TransactionVersion.LATEST_PRODUCTION.transactionLogValueVersion())
                             .whenComplete((v, t) -> {
