@@ -1086,8 +1086,13 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             if (currentBatch != null && currentBatch.builder.numRecords() > 0) {
                 currentBatch.deferredEvents.add(event);
             } else {
-                if (coordinator.lastCommittedOffset() < coordinator.lastWrittenOffset()) {
-                    deferredEventQueue.add(coordinator.lastWrittenOffset(), DeferredEventCollection.of(log, event));
+                // Check if there's a pending flush or if there are uncommitted writes.
+                // With async flushes, currentBatch may be null but there could still be
+                // a pending flush operation. We use expectedNextWriteOffset which tracks
+                // the expected offset after pending flushes complete.
+                long effectiveLastWrittenOffset = Math.max(coordinator.lastWrittenOffset(), expectedNextWriteOffset);
+                if (coordinator.lastCommittedOffset() < effectiveLastWrittenOffset) {
+                    deferredEventQueue.add(effectiveLastWrittenOffset, DeferredEventCollection.of(log, event));
                 } else {
                     event.complete(null);
                 }
@@ -1242,8 +1247,9 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
                 // Write the current batch if it is transactional, if the linger timeout
                 // has expired, or if it is full. 
-                // If flushing fails, we don't catch the exception in order to let
-                // the caller fail the current operation.
+                // The future is intentionally not awaited here - the event is already added
+                // to the batch's deferred events and will be completed when the async flush
+                // finishes (via deferredEventQueue.add on success or failBatch on failure).
                 maybeFlushCurrentBatch(currentTimeMs);
             }
         }
