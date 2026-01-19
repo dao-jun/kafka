@@ -166,6 +166,23 @@ class CoordinatorPartitionWriter(
     partitionResult.info.lastOffset + 1
   }
 
+  /**
+   * {@inheritDoc }
+   */
+  override def appendAsync(
+    tp: TopicPartition,
+    verificationGuard: VerificationGuard,
+    records: MemoryRecords,
+    transactionVersion: Short
+  ): CompletableFuture[java.lang.Long] = {
+    try {
+      val offset = append(tp, verificationGuard, records, transactionVersion)
+      CompletableFuture.completedFuture(offset)
+    } catch {
+      case t: Throwable => CompletableFuture.failedFuture(t)
+    }
+  }
+
   override def deleteRecords(tp: TopicPartition, deleteBeforeOffset: Long): CompletableFuture[Void] = {
     val responseFuture: CompletableFuture[Void] = new CompletableFuture[Void]()
 

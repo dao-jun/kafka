@@ -91,6 +91,23 @@ public interface PartitionWriter {
     ) throws KafkaException;
 
     /**
+     * Asynchronously write records to the partitions.
+     *
+     * @param tp                The partition to write records to.
+     * @param verificationGuard The verification guard.
+     * @param records           The MemoryRecords.
+     * @param transactionVersion  The transaction version (1 = TV1, 2 = TV2 etc.).
+     *                            Use TV_UNKNOWN (-1) for non-transaction writes.
+     * @return A future containing the log end offset right after the written records.
+     */
+    CompletableFuture<Long> appendAsync(
+        TopicPartition tp,
+        VerificationGuard verificationGuard,
+        MemoryRecords records,
+        short transactionVersion
+    );
+
+    /**
      * Verify the transaction.
      *
      * @param tp                The partition to write records to.

@@ -1169,6 +1169,10 @@ public class CoordinatorRuntimeTest {
             TXN_OFFSET_COMMIT_LATEST_VERSION
         )).thenReturn(CompletableFuture.completedFuture(guard));
 
+        // Prepare the async append to return a completed future with offset 2.
+        when(writer.appendAsync(any(), any(), any(), anyShort()))
+            .thenReturn(CompletableFuture.completedFuture(2L));
+
         // Schedule a transactional write.
         runtime.scheduleTransactionalWriteOperation(
             "tnx-write",
@@ -1184,7 +1188,7 @@ public class CoordinatorRuntimeTest {
         // Verify that the writer got the records with the correct
         // producer id and producer epoch.
         // Regular transactional writes (not transaction markers) use TV_UNKNOWN
-        verify(writer, times(1)).append(
+        verify(writer, times(1)).appendAsync(
             eq(TP),
             eq(guard),
             eq(transactionalRecords(
@@ -1278,7 +1282,7 @@ public class CoordinatorRuntimeTest {
         assertFutureThrows(NotEnoughReplicasException.class, future);
 
         // Verify that the writer is not called.
-        verify(writer, times(0)).append(
+        verify(writer, times(0)).appendAsync(
             any(),
             any(),
             any(),

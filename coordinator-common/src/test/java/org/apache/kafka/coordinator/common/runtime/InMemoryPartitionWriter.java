@@ -117,6 +117,21 @@ public class InMemoryPartitionWriter implements PartitionWriter {
     }
 
     @Override
+    public CompletableFuture<Long> appendAsync(
+        TopicPartition tp,
+        VerificationGuard verificationGuard,
+        MemoryRecords batch,
+        short transactionVersion
+    ) {
+        try {
+            long offset = append(tp, verificationGuard, batch, transactionVersion);
+            return CompletableFuture.completedFuture(offset);
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
+    @Override
     public CompletableFuture<Void> deleteRecords(
         TopicPartition tp,
         long deleteBeforeOffset

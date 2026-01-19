@@ -823,59 +823,61 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          * associated with the batch are added to the deferred event queue.
          */
         private void flushCurrentBatch() {
-            if (currentBatch != null) {
-                try {
-                    if (currentBatch.builder.numRecords() == 0) {
-                        // The only way we can get here is if append() has failed in an unexpected
-                        // way and left an empty batch. Try to clean it up.
-                        log.debug("Tried to flush an empty batch for {}.", tp);
-                        // There should not be any deferred events attached to the batch. We fail
-                        // the batch just in case. As a side effect, coordinator state is also
-                        // reverted, but there should be no changes since the batch was empty.
-                        failCurrentBatch(new IllegalStateException("Record batch was empty"));
-                        return;
-                    }
+            if (currentBatch == null) {
+                return;
+            }
 
-                    long flushStartMs = time.milliseconds();
-                    runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
-                    // Write the records to the log and update the last written offset.
-                    // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
-                    long offset = partitionWriter.append(
-                        tp,
-                        currentBatch.verificationGuard,
-                        currentBatch.builder.build(),
-                        TransactionVersion.TV_UNKNOWN
-                    );
-                    runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
-                    coordinator.updateLastWrittenOffset(offset);
-
-                    if (offset != currentBatch.nextOffset) {
-                        log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
-                            "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
-                            "will be reloaded in order to re-synchronize the state machine.",
-                            tp, offset, currentBatch.nextOffset);
-                        // Transition to FAILED state to unload the state machine and complete
-                        // exceptionally all the pending operations.
-                        transitionTo(CoordinatorState.FAILED);
-                        // Transition to LOADING to trigger the restoration of the state.
-                        transitionTo(CoordinatorState.LOADING);
-                        // Thrown NotCoordinatorException to fail the operation that
-                        // triggered the write. We use NotCoordinatorException to be
-                        // consistent with the transition to FAILED.
-                        throw Errors.NOT_COORDINATOR.exception();
-                    }
-
-                    // Add all the pending deferred events to the deferred event queue.
-                    deferredEventQueue.add(offset, currentBatch.deferredEvents);
-
-                    // Free up the current batch.
-                    freeCurrentBatch();
-                } catch (Throwable t) {
-                    log.error("Writing records to {} failed due to: {}.", tp, t.getMessage(), t);
-                    failCurrentBatch(t);
-                    // We rethrow the exception for the caller to handle it too.
-                    throw t;
+            try {
+                if (currentBatch.builder.numRecords() == 0) {
+                    // The only way we can get here is if append() has failed in an unexpected
+                    // way and left an empty batch. Try to clean it up.
+                    log.debug("Tried to flush an empty batch for {}.", tp);
+                    // There should not be any deferred events attached to the batch. We fail
+                    // the batch just in case. As a side effect, coordinator state is also
+                    // reverted, but there should be no changes since the batch was empty.
+                    failCurrentBatch(new IllegalStateException("Record batch was empty"));
+                    return;
                 }
+
+                long flushStartMs = time.milliseconds();
+                runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+                // Write the records to the log asynchronously and update the last written offset.
+                // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
+                long offset = partitionWriter.appendAsync(
+                    tp,
+                    currentBatch.verificationGuard,
+                    currentBatch.builder.build(),
+                    TransactionVersion.TV_UNKNOWN
+                ).join();
+                runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+                coordinator.updateLastWrittenOffset(offset);
+
+                if (offset != currentBatch.nextOffset) {
+                    log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
+                        "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
+                        "will be reloaded in order to re-synchronize the state machine.",
+                        tp, offset, currentBatch.nextOffset);
+                    // Transition to FAILED state to unload the state machine and complete
+                    // exceptionally all the pending operations.
+                    transitionTo(CoordinatorState.FAILED);
+                    // Transition to LOADING to trigger the restoration of the state.
+                    transitionTo(CoordinatorState.LOADING);
+                    // Thrown NotCoordinatorException to fail the operation that
+                    // triggered the write. We use NotCoordinatorException to be
+                    // consistent with the transition to FAILED.
+                    throw Errors.NOT_COORDINATOR.exception();
+                }
+
+                // Add all the pending deferred events to the deferred event queue.
+                deferredEventQueue.add(offset, currentBatch.deferredEvents);
+
+                // Free up the current batch.
+                freeCurrentBatch();
+            } catch (Throwable t) {
+                log.error("Writing records to {} failed due to: {}.", tp, t.getMessage(), t);
+                failCurrentBatch(t);
+                // We rethrow the exception for the caller to handle it too.
+                throw t;
             }
         }
 
@@ -1183,7 +1185,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 );
 
                 long flushStartMs = time.milliseconds();
-                long offset = partitionWriter.append(
+                long offset = partitionWriter.appendAsync(
                     tp,
                     VerificationGuard.SENTINEL,
                     MemoryRecords.withEndTransactionMarker(
@@ -1196,7 +1198,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         )
                     ),
                     transactionVersion
-                );
+                ).join();
                 runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
                 coordinator.updateLastWrittenOffset(offset);
 
