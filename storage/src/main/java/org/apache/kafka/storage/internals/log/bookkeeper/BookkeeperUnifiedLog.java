@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
@@ -39,6 +40,7 @@ import org.apache.kafka.storage.internals.log.AbortedTxn;
 import org.apache.kafka.storage.internals.log.AppendOrigin;
 import org.apache.kafka.storage.internals.log.AsyncOffsetReader;
 import org.apache.kafka.storage.internals.log.AsyncProducerStateManager;
+import org.apache.kafka.storage.internals.log.AsyncTransactionIndex;
 import org.apache.kafka.storage.internals.log.BatchMetadata;
 import org.apache.kafka.storage.internals.log.CompletedTxn;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
@@ -134,6 +136,11 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
     @Override
     public void assignEpochStartOffset(int leaderEpoch, long startOffset) {
 
+    }
+
+    @VisibleForTesting
+    public AsyncTransactionIndex transactionIndex() {
+        return bookkeeperLocalLog.txnIndex;
     }
 
     public CompletableFuture<Void> initialize() {
@@ -466,7 +473,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @Override
     public CompletableFuture<Void> flushProducerStateSnapshotAsync(Path snapshot) {
-        return super.flushProducerStateSnapshotAsync(snapshot);
+        return ((AsyncProducerStateManager) producerStateManager).takeSnapshotAsync();
     }
 
     @Override
@@ -495,6 +502,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @Override
     public void closeHandlers() {
+        // no-op
     }
 
     @Override

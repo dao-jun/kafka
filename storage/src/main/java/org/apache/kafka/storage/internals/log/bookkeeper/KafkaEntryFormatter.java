@@ -40,9 +40,8 @@ public class KafkaEntryFormatter {
     private static final Commands.ChecksumType CHECKSUM_TYPE = Commands.ChecksumType.None;
 
     public static ByteBuf encode(LogAppendInfo appendInfo, MemoryRecords records) {
-        final long numMessages = appendInfo.numMessages();
         final ByteBuf payload = wrapByteBuffer(records.buffer());
-        final MessageMetadata metadata = metadata(numMessages, records);
+        final MessageMetadata metadata = metadata(appendInfo);
         return serializeMetadataAndPayload(CHECKSUM_TYPE, metadata, payload);
     }
 
@@ -79,11 +78,12 @@ public class KafkaEntryFormatter {
         return new RecordsDecodeResult(batchedByteBuf, numberOfMessages, MemoryRecords.readableRecords(batchedByteBuf.nioBuffer()));
     }
 
-    public static MessageMetadata metadata(long numberOfMessages, MemoryRecords records) {
-        MessageMetadata metadata = new MessageMetadata();
-        metadata.setNumMessagesInBatch((int) numberOfMessages);
-        metadata.setProducerName("1").setSequenceId(0L).setPublishTime(System.currentTimeMillis());
-        return metadata;
+    private static MessageMetadata metadata(LogAppendInfo appendInfo) {
+        return new MessageMetadata()
+                .setPublishTime(appendInfo.maxTimestamp())
+                .setNumMessagesInBatch((int) appendInfo.numMessages())
+                .setProducerName("-")
+                .setSequenceId(-1L);
     }
 
     private static ByteBuf wrapByteBuffer(ByteBuffer payload) {

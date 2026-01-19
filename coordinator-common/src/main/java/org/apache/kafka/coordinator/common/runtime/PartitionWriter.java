@@ -90,6 +90,15 @@ public interface PartitionWriter {
         short transactionVersion
     ) throws KafkaException;
 
+    default CompletableFuture<Long> appendAsync(TopicPartition tp, VerificationGuard verificationGuard,
+                                        MemoryRecords records, short transactionVersion) {
+        try {
+            return CompletableFuture.completedFuture(append(tp, verificationGuard, records, transactionVersion));
+        } catch (KafkaException e) {
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
     /**
      * Verify the transaction.
      *
