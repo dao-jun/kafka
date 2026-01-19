@@ -18,6 +18,7 @@ package org.apache.kafka.coordinator.common.runtime;
 
 import java.util.Deque;
 import java.util.LinkedList;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
@@ -57,8 +58,20 @@ public class DirectEventProcessor implements CoordinatorEventProcessor {
         while (!queue.isEmpty()) {
             CoordinatorEvent event = queue.removeFirst();
             try {
-                event.run();
+                CompletableFuture<Void> future = event.run();
+                // For direct event processor, we wait for the async operation to complete
+                // to maintain the same synchronous semantics for testing.
+                // Note: Events manage their own completion on success. The processor
+                // only needs to complete events with exceptions when errors occur.
+                future.whenComplete((result, t) -> {
+                    if (t != null) {
+                        event.complete(t);
+                    }
+                    // Success case: events complete themselves (e.g., CoordinatorReadEvent
+                    // calls complete(null) in its run() method).
+                }).join();
             } catch (Throwable ex) {
+                // Handle synchronous exceptions from event.run() before it returns a future
                 event.complete(ex);
             }
         }

@@ -107,7 +107,7 @@ public class MultiThreadedEventProcessorTest {
         }
 
         @Override
-        public void run() {
+        public CompletableFuture<Void> run() {
             T result = supplier.get();
             executed.countDown();
 
@@ -120,6 +120,7 @@ public class MultiThreadedEventProcessorTest {
             }
 
             future.complete(result);
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override

@@ -1570,9 +1570,13 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
         /**
          * Called by the CoordinatorEventProcessor when the event is executed.
+         *
+         * @return A CompletableFuture that completes when the synchronous portion
+         *         of the event execution is done. The actual result of the write
+         *         operation is delivered via the event's future field.
          */
         @Override
-        public void run() {
+        public CompletableFuture<Void> run() {
             try {
                 // Get the context of the coordinator or fail if the coordinator is not in active state.
                 withActiveContextOrThrow(tp, context -> {
@@ -1599,8 +1603,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         deferredEventQueuedTimestamp = time.milliseconds();
                     }
                 });
+                return CompletableFuture.completedFuture(null);
             } catch (Throwable t) {
                 complete(t);
+                return CompletableFuture.completedFuture(null);
             }
         }
 
@@ -1737,9 +1743,11 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
         /**
          * Called by the CoordinatorEventProcessor when the event is executed.
+         *
+         * @return A CompletableFuture that completes when the event execution is done.
          */
         @Override
-        public void run() {
+        public CompletableFuture<Void> run() {
             try {
                 // Get the context of the coordinator or fail if the coordinator is not in active state.
                 withActiveContextOrThrow(tp, context -> {
@@ -1755,6 +1763,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             } catch (Throwable t) {
                 complete(t);
             }
+            return CompletableFuture.completedFuture(null);
         }
 
         /**
@@ -1882,9 +1891,12 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
         /**
          * Called by the CoordinatorEventProcessor when the event is executed.
+         *
+         * @return A CompletableFuture that completes when the synchronous portion
+         *         of the event execution is done.
          */
         @Override
-        public void run() {
+        public CompletableFuture<Void> run() {
             try {
                 withActiveContextOrThrow(tp, context -> {
                     context.completeTransaction(
@@ -1904,8 +1916,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         deferredEventQueuedTimestamp = time.milliseconds();
                     }
                 });
+                return CompletableFuture.completedFuture(null);
             } catch (Throwable t) {
                 complete(t);
+                return CompletableFuture.completedFuture(null);
             }
         }
 
@@ -2003,14 +2017,17 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
         /**
          * Called by the CoordinatorEventProcessor when the event is executed.
+         *
+         * @return A CompletableFuture that completes when the event execution is done.
          */
         @Override
-        public void run() {
+        public CompletableFuture<Void> run() {
             try {
                 op.run();
             } catch (Throwable t) {
                 complete(t);
             }
+            return CompletableFuture.completedFuture(null);
         }
 
         /**

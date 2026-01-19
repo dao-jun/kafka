@@ -24,6 +24,7 @@ import org.slf4j.Logger;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -144,12 +145,32 @@ public final class MultiThreadedEventProcessor implements CoordinatorEventProces
                         log.debug("Executing event: {}.", event);
                         long dequeuedTimeMs = time.milliseconds();
                         metrics.recordEventQueueTime(dequeuedTimeMs - event.createdTimeMs());
-                        event.run();
-                        metrics.recordEventProcessingTime(time.milliseconds() - dequeuedTimeMs);
+
+                        // Execute the event asynchronously. The event.run() returns a
+                        // CompletableFuture that completes when the async operation is done.
+                        CompletableFuture<Void> runFuture = event.run();
+
+                        // Wait for the async operation to complete before marking the event as done.
+                        // This ensures proper ordering of events for the same partition key.
+                        // Note: Events manage their own completion on success. The processor
+                        // only needs to complete events with exceptions when errors occur.
+                        runFuture.whenComplete((result, t) -> {
+                            if (t != null) {
+                                log.error("Failed to run event {} due to: {}.", event, t.getMessage(), t);
+                                event.complete(t);
+                            }
+                            // Record metrics and mark event as done for both success and failure.
+                            // This is correct because:
+                            // - Success: event completes itself, we just need to track metrics
+                            // - Failure: we complete the event above, then track metrics
+                            metrics.recordEventProcessingTime(time.milliseconds() - dequeuedTimeMs);
+                            accumulator.done(event);
+                        }).join();
                     } catch (Throwable t) {
+                        // Handle synchronous exceptions from event.run() before it returns a future.
+                        // This handles cases like NullPointerException during event setup.
                         log.error("Failed to run event {} due to: {}.", event, t.getMessage(), t);
                         event.complete(t);
-                    } finally {
                         accumulator.done(event);
                     }
                 }
