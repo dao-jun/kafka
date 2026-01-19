@@ -167,7 +167,7 @@ class CoordinatorPartitionWriter(
   }
 
   /**
-   * {@inheritDoc }
+   * {@inheritDoc}
    */
   override def appendAsync(
     tp: TopicPartition,
@@ -177,7 +177,7 @@ class CoordinatorPartitionWriter(
   ): CompletableFuture[java.lang.Long] = {
     try {
       val offset = append(tp, verificationGuard, records, transactionVersion)
-      CompletableFuture.completedFuture(offset)
+      CompletableFuture.completedFuture(java.lang.Long.valueOf(offset))
     } catch {
       case t: Throwable => CompletableFuture.failedFuture(t)
     }

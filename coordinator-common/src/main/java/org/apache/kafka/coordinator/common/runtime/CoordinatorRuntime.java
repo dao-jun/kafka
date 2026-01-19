@@ -841,7 +841,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
                 long flushStartMs = time.milliseconds();
                 runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
-                // Write the records to the log asynchronously and update the last written offset.
+                // Write the records to the log using appendAsync and wait for completion.
+                // This uses the async interface but blocks via join() for now.
                 // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
                 long offset = partitionWriter.appendAsync(
                     tp,
