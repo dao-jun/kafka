@@ -1174,14 +1174,22 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             // in order to respect the order.
             flushCurrentBatch();
 
+            // Save the current offset before making any state changes. If the append fails,
+            // we can revert to this offset, which will also revert all state changes made by
+            // replayEndTransactionMarker() since all coordinator state is stored in timeline
+            // data structures (TimelineHashMap, TimelineHashSet) backed by the SnapshotRegistry.
             long prevLastWrittenOffset = coordinator.lastWrittenOffset();
             try {
+                // Apply the transaction end marker to the coordinator's state. This modifies
+                // timeline data structures which track changes relative to the current snapshot.
                 coordinator.replayEndTransactionMarker(
                     producerId,
                     producerEpoch,
                     result
                 );
 
+                // Append the transaction end marker to the log. If this fails, we catch the
+                // exception and revert the coordinator state by calling revertLastWrittenOffset.
                 long flushStartMs = time.milliseconds();
                 long offset = partitionWriter.append(
                     tp,
@@ -1202,6 +1210,11 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
 
                 deferredEventQueue.add(offset, DeferredEventCollection.of(log, event));
             } catch (Throwable t) {
+                // If append fails, revert the coordinator state to the previous offset.
+                // This calls snapshotRegistry.revertToSnapshot(prevLastWrittenOffset), which
+                // discards all changes made to timeline data structures since that snapshot,
+                // including the changes made by replayEndTransactionMarker(). This ensures
+                // that the in-memory state remains consistent with the persisted log state.
                 coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
                 event.complete(t);
             }
