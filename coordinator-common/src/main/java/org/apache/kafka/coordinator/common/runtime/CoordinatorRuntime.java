@@ -823,8 +823,11 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          * locally, a new snapshot is created in the snapshot registry and the events
          * associated with the batch are added to the deferred event queue.
          * 
-         * This method uses appendAsync for non-blocking writes while maintaining
-         * compatibility with synchronous implementations through error propagation.
+         * This method uses appendAsync for non-blocking writes. For synchronous 
+         * appendAsync implementations (the default), this method will throw an exception
+         * if the append fails or if offset mismatch is detected, maintaining compatibility
+         * with the synchronous behavior. For truly async implementations, exceptions
+         * are handled in the callback.
          */
         private void flushCurrentBatch() {
             if (currentBatch == null) {
@@ -872,7 +875,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 coordinator.updateLastWrittenOffset(offset);
 
                 if (offset != expectedOffset) {
-                    log.error("Coordinator {} out of sync: expected offset {} but got {}. Reloading.",
+                    log.error("The state machine of coordinator {} is out of sync with the log. " +
+                        "Expected offset {} but got {}. The coordinator will be reloaded.",
                         tp, expectedOffset, offset);
                     transitionTo(CoordinatorState.FAILED);
                     transitionTo(CoordinatorState.LOADING);
