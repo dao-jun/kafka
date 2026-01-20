@@ -63,6 +63,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -833,11 +834,13 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          * immediately to maintain backward compatibility.
          */
         private void flushCurrentBatch() {
-            if (currentBatch == null || currentBatch.builder.numRecords() == 0) {
-                if (currentBatch != null) {
-                    log.debug("Discarding empty batch for {}.", tp);
-                    failCurrentBatch(new IllegalStateException("Record batch was empty"));
-                }
+            if (currentBatch == null) {
+                return;
+            }
+
+            if (currentBatch.builder.numRecords() == 0) {
+                log.debug("Discarding empty batch for {}.", tp);
+                failCurrentBatch(new IllegalStateException("Record batch was empty"));
                 return;
             }
 
@@ -860,8 +863,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             runtimeMetrics.recordLingerTime(flushStartMs - createTimeMs);
 
             // Holder for sync error propagation
-            final java.util.concurrent.atomic.AtomicReference<Throwable> error = 
-                new java.util.concurrent.atomic.AtomicReference<>();
+            final AtomicReference<Throwable> error = new AtomicReference<>();
 
             // Execute async write
             CompletableFuture<Long> future = partitionWriter.appendAsync(
@@ -919,11 +921,12 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         private void maybeFlushCurrentBatch(long currentTimeMs) {
             if (currentBatch == null) return;
             
-            boolean shouldFlush = currentBatch.builder.isTransactional()
-                || (appendLingerMs.isPresent() && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt())
-                || !currentBatch.builder.hasRoomFor(0);
+            boolean isTransactional = currentBatch.builder.isTransactional();
+            boolean lingerTimeExpired = appendLingerMs.isPresent() 
+                && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt();
+            boolean batchFull = !currentBatch.builder.hasRoomFor(0);
 
-            if (shouldFlush) {
+            if (isTransactional || lingerTimeExpired || batchFull) {
                 flushCurrentBatch();
             }
         }
