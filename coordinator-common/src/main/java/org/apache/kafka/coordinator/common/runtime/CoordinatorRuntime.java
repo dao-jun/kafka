@@ -854,9 +854,10 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 // Free the current batch before starting async write
                 freeCurrentBatch();
 
-                // Use a holder to track if we encountered an error during the callback
+                // Use AtomicReference to track if we encountered an error during the callback
                 // that should be propagated to the caller for synchronous implementations
-                final Throwable[] callbackError = {null};
+                final java.util.concurrent.atomic.AtomicReference<Throwable> callbackError = 
+                    new java.util.concurrent.atomic.AtomicReference<>(null);
 
                 // Write the records to the log asynchronously and update the last written offset.
                 // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
@@ -883,7 +884,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                             // Fail all deferred events with NotCoordinatorException
                             deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
                             // Record the error to propagate to caller for sync implementations
-                            callbackError[0] = Errors.NOT_COORDINATOR.exception();
+                            callbackError.set(Errors.NOT_COORDINATOR.exception());
                         } else {
                             // Add all the pending deferred events to the deferred event queue.
                             deferredEventQueue.add(offset, deferredEvents);
@@ -893,7 +894,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         coordinator.revertLastWrittenOffset(baseOffset);
                         deferredEvents.complete(exception);
                         // Record the error to propagate to caller for sync implementations
-                        callbackError[0] = exception;
+                        callbackError.set(exception);
                     }
                 });
                 
@@ -902,11 +903,12 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 // offset mismatch) and throw it to fail the caller properly.
                 if (appendFuture.isDone()) {
                     // The future completed synchronously
-                    if (callbackError[0] != null) {
-                        if (callbackError[0] instanceof RuntimeException) {
-                            throw (RuntimeException) callbackError[0];
+                    Throwable error = callbackError.get();
+                    if (error != null) {
+                        if (error instanceof RuntimeException) {
+                            throw (RuntimeException) error;
                         } else {
-                            throw new RuntimeException(callbackError[0]);
+                            throw new RuntimeException(error);
                         }
                     }
                 }
@@ -1060,8 +1062,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 // the response can be returned once any pending write operations complete.
                 waitForPendingWrites(event);
             } else {
-                // If the records are not empty, first, they are applied to the state machine,
-                // second, they are appended to the opened batch.
+                // If the records are not empty, they are first applied to the state machine
+                // and then appended to the opened batch.
                 long currentTimeMs = time.milliseconds();
 
                 // If the current write operation is transactional, the current batch
