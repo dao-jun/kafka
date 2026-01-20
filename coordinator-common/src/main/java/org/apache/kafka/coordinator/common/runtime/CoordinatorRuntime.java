@@ -819,99 +819,76 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         }
 
         /**
-         * Flushes the current (or pending) batch to the log asynchronously. When the batch is written
+         * Flushes the current (or pending) batch to the log. When the batch is written
          * locally, a new snapshot is created in the snapshot registry and the events
          * associated with the batch are added to the deferred event queue.
          * 
-         * Note: For synchronous appendAsync implementations (the default), this method
-         * will throw an exception if the append fails or if offset mismatch is detected,
-         * maintaining compatibility with the synchronous behavior. For truly async 
-         * implementations, the exception is handled in the callback.
+         * This method uses appendAsync for non-blocking writes while maintaining
+         * compatibility with synchronous implementations through error propagation.
          */
         private void flushCurrentBatch() {
-            if (currentBatch != null) {
-                if (currentBatch.builder.numRecords() == 0) {
-                    // The only way we can get here is if append() has failed in an unexpected
-                    // way and left an empty batch. Try to clean it up.
-                    log.debug("Tried to flush an empty batch for {}.", tp);
-                    // There should not be any deferred events attached to the batch. We fail
-                    // the batch just in case. As a side effect, coordinator state is also
-                    // reverted, but there should be no changes since the batch was empty.
-                    failCurrentBatch(new IllegalStateException("Record batch was empty"));
+            if (currentBatch == null) {
+                return;
+            }
+
+            if (currentBatch.builder.numRecords() == 0) {
+                log.debug("Tried to flush an empty batch for {}.", tp);
+                failCurrentBatch(new IllegalStateException("Record batch was empty"));
+                return;
+            }
+
+            long flushStartMs = time.milliseconds();
+            runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+
+            // Capture batch state before freeing
+            MemoryRecords records = currentBatch.builder.build();
+            VerificationGuard verificationGuard = currentBatch.verificationGuard;
+            long expectedOffset = currentBatch.nextOffset;
+            long baseOffset = currentBatch.baseOffset;
+            DeferredEventCollection deferredEvents = currentBatch.deferredEvents;
+
+            // Free the batch resources
+            freeCurrentBatch();
+
+            // Track errors for synchronous implementations
+            final java.util.concurrent.atomic.AtomicReference<Throwable> syncError = 
+                new java.util.concurrent.atomic.AtomicReference<>();
+
+            // Write records asynchronously
+            CompletableFuture<Long> future = partitionWriter.appendAsync(
+                tp, verificationGuard, records, TransactionVersion.TV_UNKNOWN);
+            
+            future.whenComplete((offset, exception) -> {
+                runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+
+                if (exception != null) {
+                    log.error("Writing records to {} failed due to: {}.", tp, exception.getMessage(), exception);
+                    coordinator.revertLastWrittenOffset(baseOffset);
+                    deferredEvents.complete(exception);
+                    syncError.set(exception);
                     return;
                 }
 
-                long flushStartMs = time.milliseconds();
-                runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+                coordinator.updateLastWrittenOffset(offset);
 
-                // Build the MemoryRecords from the builder
-                MemoryRecords records = currentBatch.builder.build();
-                VerificationGuard verificationGuard = currentBatch.verificationGuard;
-                long expectedOffset = currentBatch.nextOffset;
-                long baseOffset = currentBatch.baseOffset;
-                DeferredEventCollection deferredEvents = currentBatch.deferredEvents;
-
-                // Free the current batch before starting async write
-                freeCurrentBatch();
-
-                // Use AtomicReference to track if we encountered an error during the callback
-                // that should be propagated to the caller for synchronous implementations
-                final java.util.concurrent.atomic.AtomicReference<Throwable> callbackError = 
-                    new java.util.concurrent.atomic.AtomicReference<>(null);
-
-                // Write the records to the log asynchronously and update the last written offset.
-                // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
-                CompletableFuture<Long> appendFuture = partitionWriter.appendAsync(
-                    tp, verificationGuard, records, TransactionVersion.TV_UNKNOWN);
-                
-                // Handle completion of append
-                appendFuture.whenComplete((offset, exception) -> {
-                    runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
-
-                    if (exception == null) {
-                        coordinator.updateLastWrittenOffset(offset);
-
-                        if (offset != expectedOffset) {
-                            log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
-                                "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
-                                "will be reloaded in order to re-synchronize the state machine.",
-                                tp, offset, expectedOffset);
-                            // Transition to FAILED state to unload the state machine and complete
-                            // exceptionally all the pending operations.
-                            transitionTo(CoordinatorState.FAILED);
-                            // Transition to LOADING to trigger the restoration of the state.
-                            transitionTo(CoordinatorState.LOADING);
-                            // Fail all deferred events with NotCoordinatorException
-                            deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
-                            // Record the error to propagate to caller for sync implementations
-                            callbackError.set(Errors.NOT_COORDINATOR.exception());
-                        } else {
-                            // Add all the pending deferred events to the deferred event queue.
-                            deferredEventQueue.add(offset, deferredEvents);
-                        }
-                    } else {
-                        log.error("Writing records to {} failed due to: {}.", tp, exception.getMessage(), exception);
-                        coordinator.revertLastWrittenOffset(baseOffset);
-                        deferredEvents.complete(exception);
-                        // Record the error to propagate to caller for sync implementations
-                        callbackError.set(exception);
-                    }
-                });
-                
-                // For compatibility with synchronous appendAsync implementations,
-                // we need to check if an error occurred (either from an exception or 
-                // offset mismatch) and throw it to fail the caller properly.
-                if (appendFuture.isDone()) {
-                    // The future completed synchronously
-                    Throwable error = callbackError.get();
-                    if (error != null) {
-                        if (error instanceof RuntimeException) {
-                            throw (RuntimeException) error;
-                        } else {
-                            throw new RuntimeException(error);
-                        }
-                    }
+                if (offset != expectedOffset) {
+                    log.error("Coordinator {} out of sync: expected offset {} but got {}. Reloading.",
+                        tp, expectedOffset, offset);
+                    transitionTo(CoordinatorState.FAILED);
+                    transitionTo(CoordinatorState.LOADING);
+                    deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
+                    syncError.set(Errors.NOT_COORDINATOR.exception());
+                } else {
+                    deferredEventQueue.add(offset, deferredEvents);
                 }
+            });
+
+            // Propagate errors for synchronous appendAsync implementations
+            if (future.isDone() && syncError.get() != null) {
+                Throwable error = syncError.get();
+                throw (error instanceof RuntimeException) 
+                    ? (RuntimeException) error 
+                    : new RuntimeException(error);
             }
         }
 
