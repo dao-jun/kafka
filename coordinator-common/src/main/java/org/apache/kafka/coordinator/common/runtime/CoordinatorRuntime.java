@@ -775,42 +775,44 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         }
 
         /**
-         * Frees the current batch.
+         * Frees the current batch resources and resets state.
          */
         private void freeCurrentBatch() {
-            // Cancel the linger timeout.
+            if (currentBatch == null) return;
+            
+            // Cancel any pending linger timeout
             currentBatch.lingerTimeoutTask.ifPresent(TimerTask::cancel);
 
-            // Release the buffer only if it is not larger than the cachedBufferMaxBytes.
-            int cachedBufferMaxBytes = cachedBufferMaxBytesSupplier.get();
+            // Manage buffer caching
+            releaseBuffer(currentBatch.builder.buffer(), currentBatch.buffer);
+            currentBatch = null;
+        }
 
-            if (currentBatch.builder.buffer().capacity() <= cachedBufferMaxBytes) {
-                bufferSupplier.release(currentBatch.builder.buffer());
-                cachedBufferSize.set(currentBatch.builder.buffer().capacity());
-            } else if (currentBatch.buffer.capacity() <= cachedBufferMaxBytes) {
-                bufferSupplier.release(currentBatch.buffer);
-                cachedBufferSize.set(currentBatch.buffer.capacity());
-                // If the builder expands the buffer beyond the cachedBufferMaxBytes, that should also increase the discard counter.
+        /**
+         * Releases a buffer back to the pool if it fits within cache limits.
+         */
+        private void releaseBuffer(ByteBuffer builderBuffer, ByteBuffer originalBuffer) {
+            int maxCacheBytes = cachedBufferMaxBytesSupplier.get();
+
+            if (builderBuffer.capacity() <= maxCacheBytes) {
+                bufferSupplier.release(builderBuffer);
+                cachedBufferSize.set(builderBuffer.capacity());
+            } else if (originalBuffer.capacity() <= maxCacheBytes) {
+                bufferSupplier.release(originalBuffer);
+                cachedBufferSize.set(originalBuffer.capacity());
                 runtimeMetrics.recordBufferCacheDiscarded();
             } else {
                 runtimeMetrics.recordBufferCacheDiscarded();
                 cachedBufferSize.set(0L);
             }
-
-            currentBatch = null;
         }
 
         /**
-         * Adds a flush event to the end of the event queue, after any existing writes in the queue.
-         *
-         * @param expectedBatchEpoch The epoch of the batch to flush.
+         * Schedules a flush event at the end of the event queue for adaptive batching.
          */
         private void enqueueAdaptiveFlush(int expectedBatchEpoch) {
             enqueueLast(new CoordinatorInternalEvent("FlushBatch", tp, () -> {
                 withActiveContextOrThrow(tp, context -> {
-                    // The batch could have already been flushed because it reached the maximum
-                    // batch size or a transactional write came in. When this happens, we want
-                    // to avoid flushing the next batch early.
                     if (context.currentBatch != null && context.batchEpoch == expectedBatchEpoch) {
                         context.flushCurrentBatch();
                     }
@@ -819,95 +821,110 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         }
 
         /**
-         * Flushes the current (or pending) batch to the log. When the batch is written
-         * locally, a new snapshot is created in the snapshot registry and the events
-         * associated with the batch are added to the deferred event queue.
+         * Flushes the current batch asynchronously.
          * 
-         * This method uses appendAsync for non-blocking writes. For synchronous 
-         * appendAsync implementations (the default), this method will throw an exception
-         * if the append fails or if offset mismatch is detected, maintaining compatibility
-         * with the synchronous behavior. For truly async implementations, exceptions
-         * are handled in the callback.
+         * The flush operation:
+         * 1. Builds the records from the current batch
+         * 2. Writes them asynchronously via appendAsync
+         * 3. On success: updates offset and queues deferred events
+         * 4. On failure: reverts state and completes events with error
+         * 
+         * For synchronous appendAsync implementations, errors are propagated
+         * immediately to maintain backward compatibility.
          */
         private void flushCurrentBatch() {
-            if (currentBatch == null) {
+            if (currentBatch == null || currentBatch.builder.numRecords() == 0) {
+                if (currentBatch != null) {
+                    log.debug("Discarding empty batch for {}.", tp);
+                    failCurrentBatch(new IllegalStateException("Record batch was empty"));
+                }
                 return;
             }
 
-            if (currentBatch.builder.numRecords() == 0) {
-                log.debug("Tried to flush an empty batch for {}.", tp);
-                failCurrentBatch(new IllegalStateException("Record batch was empty"));
-                return;
-            }
+            // Snapshot batch state for async callback
+            final MemoryRecords records = currentBatch.builder.build();
+            final VerificationGuard guard = currentBatch.verificationGuard;
+            final long baseOffset = currentBatch.baseOffset;
+            final long expectedOffset = currentBatch.nextOffset;
+            final DeferredEventCollection events = currentBatch.deferredEvents;
+            final long createTimeMs = currentBatch.appendTimeMs;
+            final ByteBuffer builderBuffer = currentBatch.builder.buffer();
+            final ByteBuffer originalBuffer = currentBatch.buffer;
 
-            long flushStartMs = time.milliseconds();
-            runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+            // Cancel linger and clear batch before async operation
+            currentBatch.lingerTimeoutTask.ifPresent(TimerTask::cancel);
+            currentBatch = null;
 
-            // Capture batch state before freeing
-            MemoryRecords records = currentBatch.builder.build();
-            VerificationGuard verificationGuard = currentBatch.verificationGuard;
-            long expectedOffset = currentBatch.nextOffset;
-            long baseOffset = currentBatch.baseOffset;
-            DeferredEventCollection deferredEvents = currentBatch.deferredEvents;
+            // Track timing
+            final long flushStartMs = time.milliseconds();
+            runtimeMetrics.recordLingerTime(flushStartMs - createTimeMs);
 
-            // Free the batch resources
-            freeCurrentBatch();
-
-            // Track errors for synchronous implementations
-            final java.util.concurrent.atomic.AtomicReference<Throwable> syncError = 
+            // Holder for sync error propagation
+            final java.util.concurrent.atomic.AtomicReference<Throwable> error = 
                 new java.util.concurrent.atomic.AtomicReference<>();
 
-            // Write records asynchronously
+            // Execute async write
             CompletableFuture<Long> future = partitionWriter.appendAsync(
-                tp, verificationGuard, records, TransactionVersion.TV_UNKNOWN);
+                tp, guard, records, TransactionVersion.TV_UNKNOWN
+            );
             
-            future.whenComplete((offset, exception) -> {
+            future.whenComplete((offset, ex) -> {
                 runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+                releaseBuffer(builderBuffer, originalBuffer);
 
-                if (exception != null) {
-                    log.error("Writing records to {} failed due to: {}.", tp, exception.getMessage(), exception);
-                    coordinator.revertLastWrittenOffset(baseOffset);
-                    deferredEvents.complete(exception);
-                    syncError.set(exception);
-                    return;
-                }
-
-                coordinator.updateLastWrittenOffset(offset);
-
-                if (offset != expectedOffset) {
-                    log.error("The state machine of coordinator {} is out of sync with the log. " +
-                        "Expected offset {} but got {}. The coordinator will be reloaded.",
-                        tp, expectedOffset, offset);
-                    transitionTo(CoordinatorState.FAILED);
-                    transitionTo(CoordinatorState.LOADING);
-                    deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
-                    syncError.set(Errors.NOT_COORDINATOR.exception());
+                if (ex != null) {
+                    handleFlushError(ex, baseOffset, events);
+                    error.set(ex);
                 } else {
-                    deferredEventQueue.add(offset, deferredEvents);
+                    coordinator.updateLastWrittenOffset(offset);
+                    if (offset != expectedOffset) {
+                        handleOffsetMismatch(offset, expectedOffset, events);
+                        error.set(Errors.NOT_COORDINATOR.exception());
+                    } else {
+                        deferredEventQueue.add(offset, events);
+                    }
                 }
             });
 
-            // Propagate errors for synchronous appendAsync implementations
-            if (future.isDone() && syncError.get() != null) {
-                Throwable error = syncError.get();
-                throw (error instanceof RuntimeException) 
-                    ? (RuntimeException) error 
-                    : new RuntimeException(error);
+            // Propagate sync errors for backward compatibility
+            if (future.isDone() && error.get() != null) {
+                Throwable t = error.get();
+                throw (t instanceof RuntimeException) ? (RuntimeException) t : new RuntimeException(t);
             }
         }
 
         /**
-         * Flushes the current batch if it is transactional, if it has passed the append linger time, or if it is full.
+         * Handles a flush write error.
+         */
+        private void handleFlushError(Throwable ex, long baseOffset, DeferredEventCollection events) {
+            log.error("Failed to write batch to {}: {}.", tp, ex.getMessage(), ex);
+            coordinator.revertLastWrittenOffset(baseOffset);
+            events.complete(ex);
+        }
+
+        /**
+         * Handles offset mismatch after a successful write.
+         */
+        private void handleOffsetMismatch(long actualOffset, long expectedOffset, DeferredEventCollection events) {
+            log.error("Offset mismatch for {}: expected {} but got {}. Reloading coordinator.", 
+                tp, expectedOffset, actualOffset);
+            transitionTo(CoordinatorState.FAILED);
+            transitionTo(CoordinatorState.LOADING);
+            events.complete(Errors.NOT_COORDINATOR.exception());
+        }
+
+        /**
+         * Conditionally flushes the batch based on size/time/transaction constraints.
          */
         private void maybeFlushCurrentBatch(long currentTimeMs) {
-            if (currentBatch != null) {
-                if (currentBatch.builder.isTransactional() ||
-                    // When adaptive linger time is enabled, we avoid flushing here.
-                    // Instead, we rely on the flush event enqueued at the back of the event queue.
-                    (appendLingerMs.isPresent() && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt()) ||
-                    !currentBatch.builder.hasRoomFor(0)) {
-                    flushCurrentBatch();
-                }
+            if (currentBatch == null) return;
+            
+            boolean shouldFlush = currentBatch.builder.isTransactional()
+                || (appendLingerMs.isPresent() && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt())
+                || !currentBatch.builder.hasRoomFor(0);
+
+            if (shouldFlush) {
+                flushCurrentBatch();
             }
         }
 
