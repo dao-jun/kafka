@@ -23,9 +23,12 @@ import org.apache.kafka.common.errors.CoordinatorLoadInProgressException;
 import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.AbstractRecords;
+import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.record.ControlRecordType;
 import org.apache.kafka.common.record.EndTransactionMarker;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.record.TimestampType;
@@ -44,12 +47,14 @@ import org.apache.kafka.timeline.SnapshotRegistry;
 
 import org.slf4j.Logger;
 
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -63,6 +68,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static java.lang.Math.min;
 import static org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorWriteEvent.NOT_QUEUED;
 
 /**
@@ -467,12 +473,72 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
     }
 
     /**
-     * A marker class to represent a pending write. In the async implementation,
-     * writes are immediately sent to appendAsync, so this is only used for
-     * test compatibility to indicate when writes are in progress.
+     * A simple container class to hold all the attributes
+     * related to a pending batch for async batching.
      */
-    static class CoordinatorBatch {
-        // Marker class - no fields needed for async implementation
+    private static class CoordinatorBatch {
+        /**
+         * The base (or first) offset of the batch. If the batch fails
+         * for any reason, the state machines is rolled back to it.
+         */
+        final long baseOffset;
+
+        /**
+         * The time at which the batch was created.
+         */
+        final long appendTimeMs;
+
+        /**
+         * The verification guard associated to the batch if it is
+         * transactional.
+         */
+        final VerificationGuard verificationGuard;
+
+        /**
+         * The byte buffer backing the records builder.
+         */
+        final ByteBuffer buffer;
+
+        /**
+         * The records builder.
+         */
+        final MemoryRecordsBuilder builder;
+
+        /**
+         * The timer used to enforce the append linger time if
+         * it is non-zero.
+         */
+        final Optional<TimerTask> lingerTimeoutTask;
+
+        /**
+         * The deferred events associated with the batch.
+         */
+        final DeferredEventCollection deferredEvents;
+
+        /**
+         * The next offset. This is updated when records
+         * are added to the batch.
+         */
+        long nextOffset;
+
+        CoordinatorBatch(
+            Logger log,
+            long baseOffset,
+            long appendTimeMs,
+            VerificationGuard verificationGuard,
+            ByteBuffer buffer,
+            MemoryRecordsBuilder builder,
+            Optional<TimerTask> lingerTimeoutTask
+        ) {
+            this.baseOffset = baseOffset;
+            this.nextOffset = baseOffset;
+            this.appendTimeMs = appendTimeMs;
+            this.verificationGuard = verificationGuard;
+            this.buffer = buffer;
+            this.builder = builder;
+            this.lingerTimeoutTask = lingerTimeoutTask;
+            this.deferredEvents = new DeferredEventCollection(log);
+        }
     }
 
 
@@ -536,16 +602,25 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         HighWatermarkListener highWatermarklistener;
 
         /**
-         * The current batch. This is always null in the async implementation
-         * and is only maintained for test compatibility.
+         * The buffer supplier used to write records to the log.
          */
-        volatile CoordinatorBatch currentBatch;
+        BufferSupplier bufferSupplier;
 
         /**
-         * The buffer supplier used for write operations. Note: In the async
-         * implementation this is only used for test compatibility.
+         * The cached buffer size.
          */
-        final BufferSupplier bufferSupplier = new BufferSupplier.GrowableBufferSupplier();
+        AtomicLong cachedBufferSize;
+
+        /**
+         * The current (or pending) batch.
+         */
+        CoordinatorBatch currentBatch;
+
+        /**
+         * The batch epoch. Incremented every time a new batch is started.
+         * Only valid for the lifetime of the CoordinatorContext. The first batch has an epoch of 1.
+         */
+        int batchEpoch;
 
         /**
          * Constructor.
@@ -573,6 +648,8 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 executorService,
                 defaultWriteTimeout
             );
+            this.bufferSupplier = new BufferSupplier.GrowableBufferSupplier();
+            this.cachedBufferSize = new AtomicLong(0);
         }
 
         /**
@@ -686,6 +763,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
             timer.cancelAll();
             executor.cancelAll();
             deferredEventQueue.failAll(Errors.NOT_COORDINATOR.exception());
+            failCurrentBatch(Errors.NOT_COORDINATOR.exception());
             if (coordinator != null) {
                 try {
                     coordinator.onUnloaded();
@@ -697,21 +775,261 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         }
 
         /**
+         * Frees the current batch.
+         */
+        private void freeCurrentBatch() {
+            // Cancel the linger timeout.
+            currentBatch.lingerTimeoutTask.ifPresent(TimerTask::cancel);
+
+            // Release the buffer only if it is not larger than the cachedBufferMaxBytes.
+            int cachedBufferMaxBytes = cachedBufferMaxBytesSupplier.get();
+
+            if (currentBatch.builder.buffer().capacity() <= cachedBufferMaxBytes) {
+                bufferSupplier.release(currentBatch.builder.buffer());
+                cachedBufferSize.set(currentBatch.builder.buffer().capacity());
+            } else if (currentBatch.buffer.capacity() <= cachedBufferMaxBytes) {
+                bufferSupplier.release(currentBatch.buffer);
+                cachedBufferSize.set(currentBatch.buffer.capacity());
+                // If the builder expands the buffer beyond the cachedBufferMaxBytes, that should also increase the discard counter.
+                runtimeMetrics.recordBufferCacheDiscarded();
+            } else {
+                runtimeMetrics.recordBufferCacheDiscarded();
+                cachedBufferSize.set(0L);
+            }
+
+            currentBatch = null;
+        }
+
+        /**
+         * Adds a flush event to the end of the event queue, after any existing writes in the queue.
+         *
+         * @param expectedBatchEpoch The epoch of the batch to flush.
+         */
+        private void enqueueAdaptiveFlush(int expectedBatchEpoch) {
+            enqueueLast(new CoordinatorInternalEvent("FlushBatch", tp, () -> {
+                withActiveContextOrThrow(tp, context -> {
+                    // The batch could have already been flushed because it reached the maximum
+                    // batch size or a transactional write came in. When this happens, we want
+                    // to avoid flushing the next batch early.
+                    if (context.currentBatch != null && context.batchEpoch == expectedBatchEpoch) {
+                        context.flushCurrentBatch();
+                    }
+                });
+            }));
+        }
+
+        /**
+         * Flushes the current (or pending) batch to the log asynchronously. When the batch is written
+         * locally, a new snapshot is created in the snapshot registry and the events
+         * associated with the batch are added to the deferred event queue.
+         * 
+         * Note: For synchronous appendAsync implementations (the default), this method
+         * will throw an exception if the append fails or if offset mismatch is detected,
+         * maintaining compatibility with the synchronous behavior. For truly async 
+         * implementations, the exception is handled in the callback.
+         */
+        private void flushCurrentBatch() {
+            if (currentBatch != null) {
+                if (currentBatch.builder.numRecords() == 0) {
+                    // The only way we can get here is if append() has failed in an unexpected
+                    // way and left an empty batch. Try to clean it up.
+                    log.debug("Tried to flush an empty batch for {}.", tp);
+                    // There should not be any deferred events attached to the batch. We fail
+                    // the batch just in case. As a side effect, coordinator state is also
+                    // reverted, but there should be no changes since the batch was empty.
+                    failCurrentBatch(new IllegalStateException("Record batch was empty"));
+                    return;
+                }
+
+                long flushStartMs = time.milliseconds();
+                runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+
+                // Build the MemoryRecords from the builder
+                MemoryRecords records = currentBatch.builder.build();
+                VerificationGuard verificationGuard = currentBatch.verificationGuard;
+                long expectedOffset = currentBatch.nextOffset;
+                long baseOffset = currentBatch.baseOffset;
+                DeferredEventCollection deferredEvents = currentBatch.deferredEvents;
+
+                // Free the current batch before starting async write
+                freeCurrentBatch();
+
+                // Use a holder to track if we encountered an error during the callback
+                // that should be propagated to the caller for synchronous implementations
+                final Throwable[] callbackError = {null};
+
+                // Write the records to the log asynchronously and update the last written offset.
+                // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
+                CompletableFuture<Long> appendFuture = partitionWriter.appendAsync(
+                    tp, verificationGuard, records, TransactionVersion.TV_UNKNOWN);
+                
+                // Handle completion of append
+                appendFuture.whenComplete((offset, exception) -> {
+                    runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+
+                    if (exception == null) {
+                        coordinator.updateLastWrittenOffset(offset);
+
+                        if (offset != expectedOffset) {
+                            log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
+                                "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
+                                "will be reloaded in order to re-synchronize the state machine.",
+                                tp, offset, expectedOffset);
+                            // Transition to FAILED state to unload the state machine and complete
+                            // exceptionally all the pending operations.
+                            transitionTo(CoordinatorState.FAILED);
+                            // Transition to LOADING to trigger the restoration of the state.
+                            transitionTo(CoordinatorState.LOADING);
+                            // Fail all deferred events with NotCoordinatorException
+                            deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
+                            // Record the error to propagate to caller for sync implementations
+                            callbackError[0] = Errors.NOT_COORDINATOR.exception();
+                        } else {
+                            // Add all the pending deferred events to the deferred event queue.
+                            deferredEventQueue.add(offset, deferredEvents);
+                        }
+                    } else {
+                        log.error("Writing records to {} failed due to: {}.", tp, exception.getMessage(), exception);
+                        coordinator.revertLastWrittenOffset(baseOffset);
+                        deferredEvents.complete(exception);
+                        // Record the error to propagate to caller for sync implementations
+                        callbackError[0] = exception;
+                    }
+                });
+                
+                // For compatibility with synchronous appendAsync implementations,
+                // we need to check if an error occurred (either from an exception or 
+                // offset mismatch) and throw it to fail the caller properly.
+                if (appendFuture.isDone()) {
+                    // The future completed synchronously
+                    if (callbackError[0] != null) {
+                        if (callbackError[0] instanceof RuntimeException) {
+                            throw (RuntimeException) callbackError[0];
+                        } else {
+                            throw new RuntimeException(callbackError[0]);
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Flushes the current batch if it is transactional, if it has passed the append linger time, or if it is full.
+         */
+        private void maybeFlushCurrentBatch(long currentTimeMs) {
+            if (currentBatch != null) {
+                if (currentBatch.builder.isTransactional() ||
+                    // When adaptive linger time is enabled, we avoid flushing here.
+                    // Instead, we rely on the flush event enqueued at the back of the event queue.
+                    (appendLingerMs.isPresent() && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt()) ||
+                    !currentBatch.builder.hasRoomFor(0)) {
+                    flushCurrentBatch();
+                }
+            }
+        }
+
+        /**
+         * Fails the current batch, reverts to the snapshot to the base/start offset of the
+         * batch, fails all the associated events.
+         */
+        private void failCurrentBatch(Throwable t) {
+            if (currentBatch != null) {
+                coordinator.revertLastWrittenOffset(currentBatch.baseOffset);
+                currentBatch.deferredEvents.complete(t);
+                freeCurrentBatch();
+            }
+        }
+
+        /**
+         * Allocates a new batch if none already exists.
+         */
+        private void maybeAllocateNewBatch(
+            long producerId,
+            short producerEpoch,
+            VerificationGuard verificationGuard,
+            long currentTimeMs
+        ) {
+            if (currentBatch == null) {
+                int maxBatchSize = partitionWriter.config(tp).maxMessageSize();
+                long prevLastWrittenOffset = coordinator.lastWrittenOffset();
+                ByteBuffer buffer = bufferSupplier.get(min(INITIAL_BUFFER_SIZE, maxBatchSize));
+
+                MemoryRecordsBuilder builder = new MemoryRecordsBuilder(
+                    buffer,
+                    RecordBatch.CURRENT_MAGIC_VALUE,
+                    compression,
+                    TimestampType.CREATE_TIME,
+                    0L,
+                    currentTimeMs,
+                    producerId,
+                    producerEpoch,
+                    0,
+                    producerId != RecordBatch.NO_PRODUCER_ID,
+                    false,
+                    RecordBatch.NO_PARTITION_LEADER_EPOCH,
+                    maxBatchSize
+                );
+
+                batchEpoch++;
+
+                Optional<TimerTask> lingerTimeoutTask = Optional.empty();
+                if (appendLingerMs.isPresent()) {
+                    if (appendLingerMs.getAsInt() > 0) {
+                        lingerTimeoutTask = Optional.of(new TimerTask(appendLingerMs.getAsInt()) {
+                            @Override
+                            public void run() {
+                                // An event to flush the batch is pushed to the front of the queue
+                                // to ensure that the linger time is respected.
+                                enqueueFirst(new CoordinatorInternalEvent("FlushBatch", tp, () -> {
+                                    if (this.isCancelled()) return;
+                                    withActiveContextOrThrow(tp, CoordinatorContext::flushCurrentBatch);
+                                }));
+                            }
+                        });
+                        CoordinatorRuntime.this.timer.add(lingerTimeoutTask.get());
+                    }
+                } else {
+                    // Always queue a flush immediately at the end of the queue, unless the batch is
+                    // transactional. Transactional batches are flushed immediately at the end of
+                    // the write, so a flush event is never needed.
+                    if (!builder.isTransactional()) {
+                        enqueueAdaptiveFlush(batchEpoch);
+                    }
+                }
+
+                currentBatch = new CoordinatorBatch(
+                    log,
+                    prevLastWrittenOffset,
+                    currentTimeMs,
+                    verificationGuard,
+                    buffer,
+                    builder,
+                    lingerTimeoutTask
+                );
+            }
+        }
+
+        /**
          * Completes the given event once all pending writes are completed.
          *
          * @param event             The event to complete once all pending
          *                          writes are completed.
          */
         private void waitForPendingWrites(DeferredEvent event) {
-            if (coordinator.lastCommittedOffset() < coordinator.lastWrittenOffset()) {
-                deferredEventQueue.add(coordinator.lastWrittenOffset(), DeferredEventCollection.of(log, event));
+            if (currentBatch != null && currentBatch.builder.numRecords() > 0) {
+                currentBatch.deferredEvents.add(event);
             } else {
-                event.complete(null);
+                if (coordinator.lastCommittedOffset() < coordinator.lastWrittenOffset()) {
+                    deferredEventQueue.add(coordinator.lastWrittenOffset(), DeferredEventCollection.of(log, event));
+                } else {
+                    event.complete(null);
+                }
             }
         }
 
         /**
-         * Appends records to the log asynchronously and replay them to the state machine.
+         * Appends records to the log and replay them to the state machine.
+         * Uses async batching to improve performance.
          *
          * @param producerId        The producer id.
          * @param producerEpoch     The producer epoch.
@@ -742,12 +1060,26 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 // the response can be returned once any pending write operations complete.
                 waitForPendingWrites(event);
             } else {
-                long baseOffset = coordinator.lastWrittenOffset();
+                // If the records are not empty, first, they are applied to the state machine,
+                // second, they are appended to the opened batch.
                 long currentTimeMs = time.milliseconds();
 
-                // Determine transaction version based on producer id
-                short transactionVersion = producerId != RecordBatch.NO_PRODUCER_ID ?
-                    (short) 2 : TransactionVersion.TV_UNKNOWN;
+                // If the current write operation is transactional, the current batch
+                // is written before proceeding with it.
+                if (producerId != RecordBatch.NO_PRODUCER_ID) {
+                    isAtomic = true;
+                    // If flushing fails, we don't catch the exception in order to let
+                    // the caller fail the current operation.
+                    flushCurrentBatch();
+                }
+
+                // Allocate a new batch if none exists.
+                maybeAllocateNewBatch(
+                    producerId,
+                    producerEpoch,
+                    verificationGuard,
+                    currentTimeMs
+                );
 
                 // Prepare the records.
                 List<SimpleRecord> recordsToAppend = new ArrayList<>(records.size());
@@ -759,82 +1091,93 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                     ));
                 }
 
-                // Build MemoryRecords directly without batching
-                SimpleRecord[] recordsArray = recordsToAppend.toArray(new SimpleRecord[0]);
-                MemoryRecords memoryRecords = MemoryRecords.withRecords(
-                    RecordBatch.CURRENT_MAGIC_VALUE,
-                    0L,
-                    compression,
-                    TimestampType.CREATE_TIME,
-                    producerId,
-                    producerEpoch,
-                    0,
-                    RecordBatch.NO_PARTITION_LEADER_EPOCH,
-                    producerId != RecordBatch.NO_PRODUCER_ID,
-                    recordsArray
-                );
+                if (isAtomic) {
+                    // Compute the size of the records.
+                    int estimatedSizeUpperBound = AbstractRecords.estimateSizeInBytes(
+                        currentBatch.builder.magic(),
+                        CompressionType.NONE,
+                        recordsToAppend
+                    );
 
-                // Replay records to state machine before async write
-                long expectedNextOffset = baseOffset;
-
-                // Set currentBatch to indicate write is in progress (for test compatibility)
-                currentBatch = new CoordinatorBatch();
-
-                try {
-                    for (U record : records) {
-                        if (replay) {
-                            coordinator.replay(
-                                expectedNextOffset,
-                                producerId,
-                                producerEpoch,
-                                record
-                            );
-                        }
-                        expectedNextOffset++;
+                    if (!currentBatch.builder.hasRoomFor(estimatedSizeUpperBound)) {
+                        // Start a new batch when the total uncompressed data size would exceed
+                        // the max batch size. We still allow atomic writes with an uncompressed size
+                        // larger than the max batch size as long as they compress down to under the max
+                        // batch size. These large writes go into a batch by themselves.
+                        flushCurrentBatch();
+                        maybeAllocateNewBatch(
+                            producerId,
+                            producerEpoch,
+                            verificationGuard,
+                            currentTimeMs
+                        );
                     }
-                } catch (Throwable t) {
-                    log.error("Replaying records to {} failed due to: {}.", tp, t.getMessage(), t);
-                    coordinator.revertLastWrittenOffset(baseOffset);
-                    currentBatch = null;  // Clear on error
-                    event.complete(t);
-                    return;
                 }
 
-                // Capture the final expected offset for lambda (must be effectively final)
-                final long finalExpectedOffset = expectedNextOffset;
+                for (int i = 0; i < records.size(); i++) {
+                    U recordToReplay = records.get(i);
+                    SimpleRecord recordToAppend = recordsToAppend.get(i);
 
-                // Asynchronously append records (non-blocking)
-                partitionWriter.appendAsync(tp, verificationGuard, memoryRecords, transactionVersion)
-                    .whenComplete((offset, exception) -> {
-                        try {
-                            // Clear currentBatch to indicate write is complete (for test compatibility)
-                            currentBatch = null;
+                    if (!isAtomic) {
+                        // Check if the current batch has enough space. We check this before
+                        // replaying the record in order to avoid having to revert back
+                        // changes if the record do not fit within a batch.
+                        boolean hasRoomFor = currentBatch.builder.hasRoomFor(
+                            recordToAppend.timestamp(),
+                            recordToAppend.key(),
+                            recordToAppend.value(),
+                            recordToAppend.headers()
+                        );
 
-                            if (exception == null) {
-                                // Success: update last written offset and add event to deferred queue
-                                coordinator.updateLastWrittenOffset(offset);
-                                if (offset != finalExpectedOffset) {
-                                    log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
-                                        "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
-                                        "will be reloaded in order to re-synchronize the state machine.",
-                                        tp, offset, finalExpectedOffset);
-                                    transitionTo(CoordinatorState.FAILED);
-                                    transitionTo(CoordinatorState.LOADING);
-                                    event.complete(Errors.NOT_COORDINATOR.exception());
-                                } else {
-                                    deferredEventQueue.add(offset, DeferredEventCollection.of(log, event));
-                                }
-                            } else {
-                                // Failure: revert state and complete event with exception
-                                log.error("Writing records to {} failed due to: {}.", tp, exception.getMessage(), exception);
-                                coordinator.revertLastWrittenOffset(baseOffset);
-                                event.complete(exception);
-                            }
-                        } catch (Throwable t) {
-                            log.error("Handling write completion for {} failed due to: {}.", tp, t.getMessage(), t);
-                            event.complete(t);
+                        if (!hasRoomFor) {
+                            // If flushing fails, we don't catch the exception in order to let
+                            // the caller fail the current operation.
+                            flushCurrentBatch();
+                            maybeAllocateNewBatch(
+                                producerId,
+                                producerEpoch,
+                                verificationGuard,
+                                currentTimeMs
+                            );
                         }
-                    });
+                    }
+
+                    try {
+                        if (replay) {
+                            coordinator.replay(
+                                currentBatch.nextOffset,
+                                producerId,
+                                producerEpoch,
+                                recordToReplay
+                            );
+                        }
+
+                        currentBatch.builder.append(recordToAppend);
+                        currentBatch.nextOffset++;
+                    } catch (Throwable t) {
+                        log.error("Replaying record {} to {} failed due to: {}.", recordToReplay, tp, t.getMessage(), t);
+
+                        // Add the event to the list of pending events associated with the last
+                        // batch in order to fail it too.
+                        currentBatch.deferredEvents.add(event);
+
+                        // If an exception is thrown, we fail the entire batch. Exceptions should be
+                        // really exceptional in this code path and they would usually be the results
+                        // of bugs preventing records to be replayed.
+                        failCurrentBatch(t);
+
+                        return;
+                    }
+                }
+
+                // Add the event to the list of pending events associated with the batch.
+                currentBatch.deferredEvents.add(event);
+
+                // Write the current batch if it is transactional, if the linger timeout
+                // has expired, or if it is full.
+                // If flushing fails, we don't catch the exception in order to let
+                // the caller fail the current operation.
+                maybeFlushCurrentBatch(currentTimeMs);
             }
         }
 
@@ -861,55 +1204,45 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 throw new IllegalStateException("Coordinator must be active to complete a transaction");
             }
 
+            // The current batch must be written before the transaction marker is written
+            // in order to respect the order.
+            flushCurrentBatch();
+
             long prevLastWrittenOffset = coordinator.lastWrittenOffset();
-
-            // Set currentBatch to indicate write is in progress (for test compatibility)
-            currentBatch = new CoordinatorBatch();
-
-            // Replay the transaction marker to the state machine
             try {
                 coordinator.replayEndTransactionMarker(
                     producerId,
                     producerEpoch,
                     result
                 );
-            } catch (Throwable t) {
-                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
-                currentBatch = null;  // Clear on error
-                event.complete(t);
-                return;
-            }
 
-            // Asynchronously append the transaction marker (non-blocking)
-            MemoryRecords endTxnMarker = MemoryRecords.withEndTransactionMarker(
-                time.milliseconds(),
-                producerId,
-                producerEpoch,
-                new EndTransactionMarker(
-                    result == TransactionResult.COMMIT ? ControlRecordType.COMMIT : ControlRecordType.ABORT,
-                    coordinatorEpoch
-                )
-            );
+                long flushStartMs = time.milliseconds();
+                MemoryRecords endTxnMarker = MemoryRecords.withEndTransactionMarker(
+                    time.milliseconds(),
+                    producerId,
+                    producerEpoch,
+                    new EndTransactionMarker(
+                        result == TransactionResult.COMMIT ? ControlRecordType.COMMIT : ControlRecordType.ABORT,
+                        coordinatorEpoch
+                    )
+                );
 
-            partitionWriter.appendAsync(tp, VerificationGuard.SENTINEL, endTxnMarker, transactionVersion)
-                .whenComplete((offset, exception) -> {
-                    try {
-                        // Clear currentBatch to indicate write is complete (for test compatibility)
-                        currentBatch = null;
+                partitionWriter.appendAsync(tp, VerificationGuard.SENTINEL, endTxnMarker, transactionVersion)
+                    .whenComplete((offset, exception) -> {
+                        runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
 
                         if (exception == null) {
-                            // Success: update last written offset and add event to deferred queue
                             coordinator.updateLastWrittenOffset(offset);
                             deferredEventQueue.add(offset, DeferredEventCollection.of(log, event));
                         } else {
-                            // Failure: revert state and complete event with exception
                             coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
                             event.complete(exception);
                         }
-                    } catch (Throwable t) {
-                        event.complete(t);
-                    }
-                });
+                    });
+            } catch (Throwable t) {
+                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                event.complete(t);
+            }
         }
     }
 
@@ -1854,9 +2187,9 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
         this.appendLingerMs = appendLingerMs;
         this.executorService = executorService;
         this.cachedBufferMaxBytesSupplier = cachedBufferMaxBytesSupplier;
-        // Note: Buffer cache has been removed in favor of async append (0-blocking)
-        // The gauge is registered to return 0 to maintain compatibility
-        this.runtimeMetrics.registerBufferCacheSizeGauge(() -> 0L);
+        this.runtimeMetrics.registerBufferCacheSizeGauge(
+            () -> coordinators.values().stream().mapToLong(c -> c.cachedBufferSize.get()).sum()
+        );
     }
 
     /**

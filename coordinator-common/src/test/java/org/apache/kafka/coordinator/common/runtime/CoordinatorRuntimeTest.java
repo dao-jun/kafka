@@ -1159,6 +1159,15 @@ public class CoordinatorRuntimeTest {
         // Prepare the log config.
         when(writer.config(TP)).thenReturn(new LogConfig(Map.of()));
 
+        // Set up appendAsync to delegate to append and return result as CompletableFuture
+        when(writer.appendAsync(any(), any(), any(), anyShort())).thenAnswer(invocation -> {
+            TopicPartition tp = invocation.getArgument(0);
+            VerificationGuard vg = invocation.getArgument(1);
+            MemoryRecords records = invocation.getArgument(2);
+            short txnVersion = invocation.getArgument(3);
+            return CompletableFuture.completedFuture(writer.append(tp, vg, records, txnVersion));
+        });
+
         // Prepare the transaction verification.
         VerificationGuard guard = new VerificationGuard();
         when(writer.maybeStartTransactionVerification(
@@ -1277,8 +1286,14 @@ public class CoordinatorRuntimeTest {
         // Verify that the future is failed with the expected exception.
         assertFutureThrows(NotEnoughReplicasException.class, future);
 
-        // Verify that the writer is not called.
+        // Verify that neither append nor appendAsync is called.
         verify(writer, times(0)).append(
+            any(),
+            any(),
+            any(),
+            anyShort()
+        );
+        verify(writer, times(0)).appendAsync(
             any(),
             any(),
             any(),
