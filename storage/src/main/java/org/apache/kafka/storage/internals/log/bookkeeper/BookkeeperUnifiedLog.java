@@ -89,12 +89,12 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
     }
 
     @Override
-    protected void updateLogStartOffset(long offset) throws IOException {
+    protected void updateLogStartOffset(long offset) {
         // noop
     }
 
     @Override
-    public void updateLocalLogStartOffset(long offset) throws IOException {
+    public void updateLocalLogStartOffset(long offset) {
         // noop
     }
 

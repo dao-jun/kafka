@@ -43,7 +43,7 @@ import org.apache.kafka.server.metrics.KafkaMetricsGroup
 import org.apache.kafka.server.util.{FileLock, Scheduler}
 import org.apache.kafka.storage.internals.log.{CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetsListener, ProducerStateManagerConfig, RemoteIndexCache, UnifiedLog, LogManager => JLogManager}
 import org.apache.kafka.storage.internals.checkpoint.{CleanShutdownFileHandler, OffsetCheckpointFile}
-import org.apache.kafka.storage.internals.log.bookkeeper.BookkeeperStorageSingleton
+import org.apache.kafka.storage.internals.log.bookkeeper.BookkeeperUnifiedLog
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util
@@ -104,18 +104,7 @@ class LogManager(logDirs: Seq[File],
   @volatile private var _currentDefaultConfig = initialDefaultConfig
   @volatile private var numRecoveryThreadsPerDataDir = recoveryThreadsPerDataDir
 
-  private val bookkeeperStorageSingleton: Option[BookkeeperStorageSingleton] =
-    if (initialDefaultConfig.asyncLogMode) {
-      Some(new BookkeeperStorageSingleton(initialDefaultConfig))
-    } else {
-      None
-    }
-
-  def getBookkeeperStorageSingleton: Option[BookkeeperStorageSingleton] = bookkeeperStorageSingleton
-
-  private val asyncLogMode: Boolean = initialDefaultConfig.asyncLogMode
-
-  def asyncLogModeEnabled: Boolean = asyncLogMode
+  def asyncLogModeEnabled: Boolean = false
 
   // This map contains all partitions whose logs are getting loaded and initialized. If log configuration
   // of these partitions get updated at the same time, the corresponding entry in this map is set to "true",
@@ -153,9 +142,6 @@ class LogManager(logDirs: Seq[File],
   def onlineLogDirId(uuid: Uuid): Boolean = directoryIds.exists(_._2 == uuid)
 
   private def offlineLogDirs: Iterable[File] = {
-    if (asyncLogMode) {
-      return Set.empty
-    }
     val logDirsSet = mutable.Set[File]() ++= logDirs
     _liveLogDirs.forEach(dir => logDirsSet -= dir)
     logDirsSet
@@ -187,10 +173,6 @@ class LogManager(logDirs: Seq[File],
    * </ol>
    */
   private def createAndValidateLogDirs(dirs: Seq[File], initialOfflineDirs: Seq[File]): ConcurrentLinkedQueue[File] = {
-    if (asyncLogMode) {
-      return new ConcurrentLinkedQueue[File]()
-    }
-
     val liveLogDirs = new ConcurrentLinkedQueue[File]()
     val canonicalPaths = mutable.HashSet.empty[String]
 
@@ -629,7 +611,7 @@ class LogManager(logDirs: Seq[File],
     loadLogs(defaultConfig, topicConfigOverrides, isStray) // this could take a while if shutdown was not clean
 
     /* Schedule the cleanup task to delete old logs */
-    if (scheduler != null && !initialDefaultConfig.asyncLogMode) {
+    if (scheduler != null) {
       info("Starting log cleanup with a period of %d ms.".format(retentionCheckMs))
       scheduler.schedule("kafka-log-retention",
                          () => cleanupLogs(),
@@ -652,9 +634,7 @@ class LogManager(logDirs: Seq[File],
                          () => deleteLogs(),
                          initialTaskDelayMs)
     }
-    if (initialDefaultConfig.asyncLogMode) {
-      info("The current log implementation name is ML, skip start LogCleaner")
-    } else if (cleanerConfig.enableCleaner) {
+    if (cleanerConfig.enableCleaner) {
       _cleaner = cleanerFactory(cleanerConfig, liveLogDirs.asJava, currentLogs, logDirFailureChannel, time)
       _cleaner.startup()
     } else {
@@ -1121,6 +1101,11 @@ class LogManager(logDirs: Seq[File],
       }
       log
     }
+  }
+
+  def getOrCreateLogAsync(topicPartition: TopicPartition, isNew: Boolean, isFuture: Boolean,
+                          topicId: Optional[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[BookkeeperUnifiedLog] = {
+    throw new UnsupportedOperationException("Not implemented")
   }
 
   private[log] def createLogDirectory(logDir: File, logDirName: String): Try[File] = {

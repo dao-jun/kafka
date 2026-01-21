@@ -19,7 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.CoordinatorPartitionWriter
 import kafka.coordinator.transaction.TransactionCoordinator
-import kafka.log.LogManager
+import kafka.log.{AsyncLogManager, LogManager}
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.metadata._
@@ -41,7 +41,7 @@ import org.apache.kafka.coordinator.share.metrics.{ShareCoordinatorMetrics, Shar
 import org.apache.kafka.coordinator.share.{ShareCoordinator, ShareCoordinatorRecordSerde, ShareCoordinatorService}
 import org.apache.kafka.coordinator.transaction.ProducerIdManager
 import org.apache.kafka.image.publisher.{BrokerRegistrationTracker, MetadataPublisher}
-import org.apache.kafka.metadata.{BrokerState, ListenerInfo, KRaftMetadataCache, MetadataCache, MetadataVersionConfigValidator}
+import org.apache.kafka.metadata.{BrokerState, KRaftMetadataCache, ListenerInfo, MetadataCache, MetadataVersionConfigValidator}
 import org.apache.kafka.metadata.publisher.{AclPublisher, DelegationTokenPublisher, DynamicClientQuotaPublisher, DynamicTopicClusterQuotaPublisher, ScramPublisher}
 import org.apache.kafka.security.{CredentialProvider, DelegationTokenManager}
 import org.apache.kafka.server.authorizer.Authorizer
@@ -57,7 +57,7 @@ import org.apache.kafka.server.util.timer.{SystemTimer, SystemTimerReaper}
 import org.apache.kafka.server.util.{Deadline, FutureUtils, KafkaScheduler}
 import org.apache.kafka.server.{AssignmentsManager, BrokerFeatures, ClientMetricsManager, DefaultApiVersionManager, DelayedActionQueue, ProcessRole}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
-import org.apache.kafka.storage.internals.log.LogDirFailureChannel
+import org.apache.kafka.storage.internals.log.{LogConfig, LogDirFailureChannel}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.apache.kafka.server.NodeToControllerChannelManagerImpl
 import org.apache.kafka.server.RaftControllerNodeProvider
@@ -167,6 +167,8 @@ class BrokerServer(
 
   var persister: Persister = _
 
+  private val asyncLogMode: Boolean = new LogConfig(config.extractLogConfigMap).asyncLogMode
+
   private def maybeChangeStatus(from: ProcessStatus, to: ProcessStatus): Boolean = {
     lock.lock()
     try {
@@ -212,13 +214,25 @@ class BrokerServer(
 
       // Create log manager, but don't start it because we need to delay any potential unclean shutdown log recovery
       // until we catch up on the metadata log and have up-to-date topic and broker configs.
-      logManager = LogManager(config,
-        sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
-        metadataCache,
-        kafkaScheduler,
-        time,
-        brokerTopicStats,
-        logDirFailureChannel)
+      logManager = if (!asyncLogMode) {
+        LogManager(config,
+          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel)
+      } else {
+        AsyncLogManager(
+          config,
+          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel
+        )
+      }
 
       lifecycleManager = new BrokerLifecycleManager(config,
         time,

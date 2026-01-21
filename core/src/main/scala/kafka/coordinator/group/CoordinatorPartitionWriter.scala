@@ -17,9 +17,9 @@
 package kafka.coordinator.group
 
 import kafka.server.ReplicaManager
-import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.record.{MemoryRecords, RecordBatch}
+import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
 import org.apache.kafka.coordinator.common.runtime.PartitionWriter
 import org.apache.kafka.server.ActionQueue
 import org.apache.kafka.server.common.RequestLocal
@@ -164,6 +164,17 @@ class CoordinatorPartitionWriter(
 
     // Required offset.
     partitionResult.info.lastOffset + 1
+  }
+
+  // TODO
+  override def appendAsync(
+    tp: TopicPartition,
+    verificationGuard: VerificationGuard,
+    records: MemoryRecords,
+    transactionVersion: Short
+  ): CompletableFuture[Long] = {
+    val future = new CompletableFuture[Long]()
+    future
   }
 
   override def deleteRecords(tp: TopicPartition, deleteBeforeOffset: Long): CompletableFuture[Void] = {
