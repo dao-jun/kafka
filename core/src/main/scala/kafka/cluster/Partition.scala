@@ -49,6 +49,7 @@ import org.apache.kafka.server.replica.Replica
 import org.apache.kafka.server.share.fetch.DelayedShareFetchPartitionKey
 import org.apache.kafka.server.storage.log.{FetchIsolation, FetchParams, UnexpectedAppendOffsetException}
 import org.apache.kafka.storage.internals.checkpoint.OffsetCheckpoints
+import org.apache.kafka.storage.internals.log.bookkeeper.BookkeeperUnifiedLog
 import org.slf4j.event.Level
 
 import java.util
@@ -176,6 +177,8 @@ class Partition(val topicPartition: TopicPartition,
   def topic: String = topicPartition.topic
   def partitionId: Int = topicPartition.partition
 
+  private val asyncLogMode: Boolean = logManager.initialDefaultConfig.asyncLogMode
+
   private val stateChangeLogger = new StateChangeLogger(localBrokerId)
   private val remoteReplicasMap = new ConcurrentHashMap[Int, Replica]
   // The read lock is only required when multiple reads are executed and needs to be in a consistent manner
@@ -234,6 +237,9 @@ class Partition(val topicPartition: TopicPartition,
   // a false positive under min isr check, it has to check the leaderReplicaIdOpt again. Though it can still be affected
   // by ABA problems when leader->follower->leader, but it should be good enough for a metric.
   def isUnderMinIsr: Boolean = {
+    if (asyncLogMode) {
+      return false
+    }
     leaderLogIfLocal.exists { partitionState.isr.size < effectiveMinIsr(_) } && isLeader
   }
 
@@ -243,6 +249,9 @@ class Partition(val topicPartition: TopicPartition,
  * is returned here.
  */
   private def effectiveMinIsr(leaderLog: UnifiedLog): Int = {
+      if (asyncLogMode) {
+        return 0
+      }
       leaderLog.config.minInSyncReplicas.min(remoteReplicasMap.size + 1)
   }
 
@@ -278,8 +287,6 @@ class Partition(val topicPartition: TopicPartition,
       }
     }
   }
-
-  private val asyncLogMode: Boolean = logManager.initialDefaultConfig.asyncLogMode
 
   def removeListener(listener: PartitionListener): Unit = {
     listeners.remove(listener)
@@ -323,7 +330,15 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   def createLogIfNotExists(isNew: Boolean, isFutureReplica: Boolean, offsetCheckpoints: OffsetCheckpoints, topicId: Option[Uuid],
-                           targetLogDirectoryId: Option[Uuid] = None): Unit = {
+                           targetLogDirectoryId: Option[Uuid] = None): CompletableFuture[Unit] = {
+    if (asyncLogMode) {
+      return createLogAsync(isNew, isFutureReplica, offsetCheckpoints, topicId, targetLogDirectoryId)
+        .thenAccept(log => {
+          this.log = Some(log)
+        })
+        .thenApply(_ => ())
+    }
+
     def maybeCreate(logOpt: Option[UnifiedLog]): UnifiedLog = {
       logOpt match {
         case Some(log) =>
@@ -341,6 +356,7 @@ class Partition(val topicPartition: TopicPartition,
     } else {
       this.log = Some(maybeCreate(this.log))
     }
+    CompletableFuture.completedFuture(())
   }
 
   // Visible for testing
@@ -366,6 +382,24 @@ class Partition(val topicPartition: TopicPartition,
     } finally {
       logManager.finishedInitializingLog(topicPartition, maybeLog)
     }
+  }
+
+  private[cluster] def createLogAsync(isNew: Boolean, isFutureReplica: Boolean, offsetCheckpoints: OffsetCheckpoints,
+                                       topicId: Option[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[BookkeeperUnifiedLog] = {
+    logManager.initializingLog(topicPartition)
+    val future = new CompletableFuture[BookkeeperUnifiedLog]()
+    logManager.getOrCreateLogAsync(topicPartition, isNew, isFutureReplica, topicId.toJava, targetLogDirectoryId)
+      .whenComplete((log, error) => {
+        if (error != null) {
+          future.completeExceptionally(error)
+        } else {
+          log.setLogOffsetsListener(logOffsetsListener)
+          log.updateHighWatermark(log.logEndOffset())
+          logManager.finishedInitializingLog(topicPartition, Some(log))
+          future.complete(log)
+        }
+      })
+     future
   }
 
   def getReplica(replicaId: Int): Option[Replica] = Option(remoteReplicasMap.get(replicaId))
@@ -630,7 +664,8 @@ class Partition(val topicPartition: TopicPartition,
         LeaderRecoveryState.RECOVERED
       )
 
-      createLogInAssignedDirectoryId(isNew, highWatermarkCheckpoints, topicId, targetDirectoryId)
+      // TODO: Make this a non-blocking call
+      createLogInAssignedDirectoryId(isNew, highWatermarkCheckpoints, topicId, targetDirectoryId).join()
 
       val leaderLog = localLogOrException
 
@@ -700,6 +735,10 @@ class Partition(val topicPartition: TopicPartition,
                    highWatermarkCheckpoints: OffsetCheckpoints,
                    topicId: Option[Uuid],
                    targetLogDirectoryId: Option[Uuid] = None): Boolean = {
+    if (asyncLogMode) {
+      // TODO Maybe we need to close the log and make it offline.
+      return isNew
+    }
     inWriteLock(leaderIsrUpdateLock) {
       if (partitionRegistration.partitionEpoch < partitionEpoch) {
         stateChangeLogger.info(s"Skipped the become-follower state change for $topicPartition with topic id $topicId, " +
@@ -746,7 +785,11 @@ class Partition(val topicPartition: TopicPartition,
     }
   }
 
-  private def createLogInAssignedDirectoryId(isNew: Boolean, highWatermarkCheckpoints: OffsetCheckpoints, topicId: Option[Uuid], targetLogDirectoryId: Option[Uuid]): Unit = {
+  private def createLogInAssignedDirectoryId(isNew: Boolean, highWatermarkCheckpoints: OffsetCheckpoints, topicId: Option[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[Unit] = {
+    if (asyncLogMode) {
+      return createLogIfNotExists(isNew, isFutureReplica = false, highWatermarkCheckpoints, topicId)
+    }
+
     targetLogDirectoryId match {
       case Some(directoryId) =>
         if (logManager.onlineLogDirId(directoryId) || !logManager.hasOfflineLogDirs() || directoryId == DirectoryId.UNASSIGNED) {
@@ -760,6 +803,7 @@ class Partition(val topicPartition: TopicPartition,
       case None =>
         createLogIfNotExists(isNew, isFutureReplica = false, highWatermarkCheckpoints, topicId)
     }
+    CompletableFuture.completedFuture(())
   }
 
   /**

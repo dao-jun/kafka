@@ -43,7 +43,7 @@ public class BookkeeperLocalLogBasicTest extends MockedBookKeeperTestCase {
 
         TopicPartition topicPartition = new TopicPartition("testBasicBookkeeperLocalLog", 1);
         AsyncTransactionIndex asyncTransactionIndex = new AsyncTransactionIndex(metadataStore, topicPartition);
-        asyncTransactionIndex.recoverSnapshot().get();
+        asyncTransactionIndex.recoverSnapshotAsync().get();
         Assertions.assertEquals(-1, asyncTransactionIndex.mapEndOffset());
 
         BookkeeperLocalLog bookkeeperLocalLog = new BookkeeperLocalLog(new LogConfig(new Properties()), new KafkaScheduler(1), topicPartition, asyncTransactionIndex);

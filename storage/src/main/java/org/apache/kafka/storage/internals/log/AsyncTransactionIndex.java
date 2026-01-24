@@ -96,7 +96,7 @@ public class AsyncTransactionIndex {
         index.headMap(logStartOffset).clear();
     }
 
-    public CompletableFuture<Void> takeSnapshot() {
+    public CompletableFuture<Void> takeSnapshotAsync() {
         if (lastSnapshotOffset <= mapEndOffset) {
             return CompletableFuture.completedFuture(null);
         }
@@ -116,7 +116,7 @@ public class AsyncTransactionIndex {
         return String.format("/kafka/txn-idx/%s-%d", tp.topic(), tp.partition());
     }
 
-    public CompletableFuture<Void> recoverSnapshot() {
+    public CompletableFuture<Void> recoverSnapshotAsync() {
         String key = buildKey();
         CompletableFuture<Void> future = new CompletableFuture<>();
         metadataStore.get(key)

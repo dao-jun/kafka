@@ -45,6 +45,9 @@
   <disallow class="com.yammer.metrics.Metrics" />
   <allow pkg="com.yammer.metrics"/>
 
+  <allow pkg="org.apache.pulsar" />
+  <allow pkg="org.apache.bookkeeper" />
+
   <subpackage name="tools">
     <allow pkg="kafka.admin" />
     <allow pkg="joptsimple" />

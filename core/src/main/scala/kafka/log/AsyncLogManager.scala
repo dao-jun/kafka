@@ -29,12 +29,13 @@ import org.apache.kafka.server.util.Scheduler
 import org.apache.kafka.storage.internals.log.bookkeeper.{BookkeeperLocalLog, BookkeeperStorageSingleton, BookkeeperUnifiedLog}
 import org.apache.kafka.storage.internals.log.{AsyncProducerStateManager, AsyncTransactionIndex, CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetsListener, ProducerStateManagerConfig, UnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
+import org.apache.bookkeeper.mledger.{AsyncCallbacks, ManagedLedgerException}
 
 import java.io.File
 import java.util
 import java.util.Optional
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
-import java.util.concurrent.{CompletableFuture, ConcurrentMap}
+import java.util.concurrent.{CompletableFuture, ConcurrentMap, CountDownLatch}
 import scala.jdk.CollectionConverters._
 import scala.collection._
 
@@ -277,14 +278,65 @@ class AsyncLogManager(logDirs: Seq[File],
                            isFuture: Boolean,
                            checkpoint: Boolean,
                            isStray: Boolean): Option[UnifiedLog] = {
-    // TODO
-    None
+    val logFuture = asyncLogs.remove(topicPartition)
+    if (logFuture == null || !logFuture.isDone || logFuture.isCompletedExceptionally) {
+      return None
+    }
+    val log = logFuture.join()
+    log.close()
+
+    val name = topicPartition.topic() + "-" + topicPartition.partition()
+    bookkeeperStorageSingleton.foreach(bookkeeperStorage => {
+      bookkeeperStorage.getManagedLedgerFactory.asyncDelete(name, new AsyncCallbacks.DeleteLedgerCallback {
+
+        override def deleteLedgerComplete(ctx: Any): Unit = {
+          info(s"Deleted log for $topicPartition")
+        }
+
+        override def deleteLedgerFailed(exception: ManagedLedgerException, ctx: Any): Unit = {
+          error(s"Failed to delete log for $topicPartition", exception)
+        }
+      }, null)
+    })
+
+    Some(log)
   }
 
   override def asyncDelete(topicPartitions: Iterable[TopicPartition],
                            isStray: Boolean,
                            errorHandler: (TopicPartition, Throwable) => Unit): Unit = {
-    // TODO
+    val latch = new CountDownLatch(topicPartitions.size)
+    topicPartitions.foreach(topicPartition => {
+      val logFuture = asyncLogs.remove(topicPartition)
+      if (logFuture != null && logFuture.isDone && !logFuture.isCompletedExceptionally) {
+        val log = logFuture.join()
+        log.closeAsync().thenAccept(_ => {
+          val name = topicPartition.topic() + "-" + topicPartition.partition()
+          bookkeeperStorageSingleton.foreach(bookkeeperStorage => {
+            bookkeeperStorage.getManagedLedgerFactory.asyncDelete(name, new AsyncCallbacks.DeleteLedgerCallback {
+              override def deleteLedgerComplete(ctx: Any): Unit = {
+                info(s"Deleted log for $topicPartition")
+                latch.countDown()
+              }
+
+              override def deleteLedgerFailed(exception: ManagedLedgerException, ctx: Any): Unit = {
+                errorHandler(topicPartition, exception)
+                latch.countDown()
+              }
+            }, null)
+          })
+        })
+      } else {
+        latch.countDown()
+      }
+    })
+
+    try {
+      latch.await()
+    } catch {
+      case e: Throwable =>
+        error(s"Failed to delete logs for $topicPartitions", e)
+    }
   }
 
   override def allLogs: Iterable[UnifiedLog] = {

@@ -63,14 +63,18 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public class BookkeeperUnifiedLog extends UnifiedLog {
     private static final Logger log = LoggerFactory.getLogger(BookkeeperUnifiedLog.class);
+
     private volatile BookkeeperLocalLog bookkeeperLocalLog;
     private final AtomicBoolean recovering = new AtomicBoolean(false);
     private final CompletableFuture<Void> initializeFuture = new CompletableFuture<>();
+    private final AsyncTransactionIndex transactionIndex;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
 
 
     public BookkeeperUnifiedLog(long logStartOffset, BookkeeperLocalLog localLog, BrokerTopicStats brokerTopicStats,
@@ -79,6 +83,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                                 boolean remoteStorageSystemEnable, LogOffsetsListener logOffsetsListener) throws IOException {
         super(logStartOffset, localLog, brokerTopicStats, producerIdExpirationCheckIntervalMs, leaderEpochCache,
                 producerStateManager, topicId, remoteStorageSystemEnable, logOffsetsListener);
+        this.transactionIndex = bookkeeperLocalLog.transactionIndex;
     }
 
     @Override
@@ -140,7 +145,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @VisibleForTesting
     public AsyncTransactionIndex transactionIndex() {
-        return bookkeeperLocalLog.txnIndex;
+        return transactionIndex;
     }
 
     public CompletableFuture<Void> initialize() {
@@ -149,11 +154,11 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
         }
 
         CompletableFuture<Void> producerRecoverFuture = ((AsyncProducerStateManager) producerStateManager).recoverSnapshotAsync();
-        CompletableFuture<Void> transactionRecoverFuture = bookkeeperLocalLog.txnIndex.recoverSnapshot();
+        CompletableFuture<Void> transactionRecoverFuture = transactionIndex.recoverSnapshotAsync();
         CompletableFuture.allOf(producerRecoverFuture, transactionRecoverFuture)
                 .thenCompose(ignore -> {
                     long producerMapEndOffset = producerStateManager.mapEndOffset();
-                    long transactionMapEndOffset = bookkeeperLocalLog.txnIndex.mapEndOffset();
+                    long transactionMapEndOffset = transactionIndex.mapEndOffset();
                     if (transactionMapEndOffset < producerMapEndOffset) {
                         // TODO
                         log.warn("Transaction map end offset {} is less than producer map end offset {}, " +
@@ -183,7 +188,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
         public void accept(MemoryRecords records) {
             for (RecordBatch batch : records.batches()) {
                 long mapEndOffset = batch.lastOffset() + 1;
-                long txnMapEndOffset = bookkeeperLocalLog.txnIndex.mapEndOffset();
+                long txnMapEndOffset = transactionIndex.mapEndOffset();
                 if (batch.hasProducerId()) {
                     long producerId = batch.producerId();
                     ProducerAppendInfo appendInfo = producerStateManager.prepareUpdate(producerId, AppendOrigin.REPLICATION);
@@ -193,13 +198,13 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                         CompletedTxn completedTxn = maybeCompletedTxn.get();
                         long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
                         if (completedTxn.isAborted() && txnMapEndOffset < mapEndOffset) {
-                            bookkeeperLocalLog.txnIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                            transactionIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
                         }
                         producerStateManager.completeTxn(completedTxn);
                     }
                 }
                 if (txnMapEndOffset < mapEndOffset) {
-                    bookkeeperLocalLog.txnIndex.updateMapEndOffset(mapEndOffset);
+                    transactionIndex.updateMapEndOffset(mapEndOffset);
                 }
                 producerStateManager.updateMapEndOffset(mapEndOffset);
             }
@@ -357,12 +362,12 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                             for (CompletedTxn completedTxn : result.completedTxns()) {
                                 long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
                                 if (completedTxn.isAborted()) {
-                                    bookkeeperLocalLog.txnIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                                    transactionIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
                                 }
                                 producerStateManager.completeTxn(completedTxn);
                             }
                             long mapEndOffset = appendInfo.lastOffset() + 1;
-                            bookkeeperLocalLog.txnIndex.updateMapEndOffset(mapEndOffset);
+                            transactionIndex.updateMapEndOffset(mapEndOffset);
                             producerStateManager.updateMapEndOffset(mapEndOffset);
                             maybeIncrementFirstUnstableOffset();
                             // Update the log end offset
@@ -496,8 +501,32 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
         return super.truncateFullyAndStartAtAsync(newOffset, logStartOffsetOpt);
     }
 
+    private final CompletableFuture<Void> closeFuture = new CompletableFuture<>();
+
     @Override
     public void close() {
+        try {
+            closeAsync().get(5000, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            log.error("Error closing BookkeeperLocalLog", e);
+        }
+    }
+
+    public CompletableFuture<Void> closeAsync() {
+        if (!closed.compareAndSet(false, true)) {
+            return closeFuture;
+        }
+        CompletableFuture.allOf(
+                transactionIndex.takeSnapshotAsync(),
+                ((AsyncProducerStateManager) producerStateManager).takeSnapshotAsync(),
+                bookkeeperLocalLog.closeAsync())
+                .whenComplete((ignored, e) -> {
+                    if (e != null) {
+                        log.error("Error closing BookkeeperLocalLog", e);
+                    }
+                    closeFuture.complete(null);
+                });
+        return closeFuture;
     }
 
     @Override

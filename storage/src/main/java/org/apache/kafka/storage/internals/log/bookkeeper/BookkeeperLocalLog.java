@@ -90,7 +90,7 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
     private final ManagedLedgerConfig managedLedgerConfig;
     private final Time time = Time.SYSTEM;
     private final AtomicInteger pendingAddEntries = new AtomicInteger();
-    protected final AsyncTransactionIndex txnIndex;
+    protected final AsyncTransactionIndex transactionIndex;
 
     private final CompletableFuture<Long> initializeFuture = new CompletableFuture<>();
     private final AtomicBoolean initialized = new AtomicBoolean(false);
@@ -100,10 +100,10 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
      * @param scheduler      The thread pool scheduler used for background actions
      * @param topicPartition The topic partition associated with this log
      */
-    public BookkeeperLocalLog(LogConfig config, Scheduler scheduler, TopicPartition topicPartition, AsyncTransactionIndex txnIndex) {
+    public BookkeeperLocalLog(LogConfig config, Scheduler scheduler, TopicPartition topicPartition, AsyncTransactionIndex transactionIndex) {
         super(DIR, config, new LogSegments(topicPartition), -1L, new LogOffsetMetadata(0L), scheduler, Time.SYSTEM, topicPartition, null);
         this.managedLedgerConfig = buildManagedLedgerConfig(config);
-        this.txnIndex = txnIndex;
+        this.transactionIndex = transactionIndex;
     }
 
     public Optional<Uuid> getTopicId() {
@@ -396,7 +396,7 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     if (lastBatch.isEmpty() || !includeAbortedTxns) {
                         return fetchDataInfo;
                     }
-                    TxnIndexSearchResult txnIndexSearchResult = txnIndex.collectAbortedTxns(startOffset, lastBatch.get().lastOffset());
+                    TxnIndexSearchResult txnIndexSearchResult = transactionIndex.collectAbortedTxns(startOffset, lastBatch.get().lastOffset());
                     List<AbortedTxn> abortedTxns = txnIndexSearchResult.abortedTransactions();
                     if (!abortedTxns.isEmpty()) {
                         List<FetchResponseData.AbortedTransaction> abortedTransactions = abortedTxns.stream().map(AbortedTxn::asAbortedTransaction).toList();

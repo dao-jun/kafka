@@ -172,8 +172,8 @@ class CoordinatorPartitionWriter(
     verificationGuard: VerificationGuard,
     records: MemoryRecords,
     transactionVersion: Short
-  ): CompletableFuture[Long] = {
-    val future = new CompletableFuture[Long]()
+  ): CompletableFuture[java.lang.Long] = {
+    val future = new CompletableFuture[java.lang.Long]()
     future
   }
 

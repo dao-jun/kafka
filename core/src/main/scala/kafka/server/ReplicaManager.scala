@@ -2128,6 +2128,9 @@ class ReplicaManager(val config: KafkaConfig,
 
   // Flushes the highwatermark value for all partitions to the highwatermark file
   def checkpointHighWatermarks(): Unit = {
+    if (logManager.asyncLogModeEnabled) {
+      return
+    }
     def putHw(logDirToCheckpoints: mutable.AnyRefMap[String, mutable.AnyRefMap[TopicPartition, JLong]],
               log: UnifiedLog): Unit = {
       val checkpoints = logDirToCheckpoints.getOrElseUpdate(log.parentDir,
