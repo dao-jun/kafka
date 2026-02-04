@@ -26,7 +26,7 @@ import org.apache.kafka.coordinator.transaction.{TransactionLogConfig, Transacti
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
 import org.apache.kafka.server.config.ServerConfigs
 import org.apache.kafka.server.util.Scheduler
-import org.apache.kafka.storage.internals.log.bookkeeper.{BookkeeperLocalLog, BookkeeperStorageSingleton, BookkeeperUnifiedLog}
+import org.apache.kafka.storage.internals.log.bookkeeper.{BookkeeperLocalLog, BookkeeperStorage, BookkeeperUnifiedLog}
 import org.apache.kafka.storage.internals.log.{AsyncProducerStateManager, AsyncTransactionIndex, CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetsListener, ProducerStateManagerConfig, UnifiedLog}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.apache.bookkeeper.mledger.{AsyncCallbacks, ManagedLedgerException}
@@ -34,7 +34,7 @@ import org.apache.bookkeeper.mledger.{AsyncCallbacks, ManagedLedgerException}
 import java.io.File
 import java.util
 import java.util.Optional
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{CompletableFuture, ConcurrentMap, CountDownLatch}
 import scala.jdk.CollectionConverters._
 import scala.collection._
@@ -58,9 +58,9 @@ class AsyncLogManager(logDirs: Seq[File],
                       time: Time,
                       remoteStorageSystemEnable: Boolean,
                       override val initialTaskDelayMs: Long,
-                      cleanerFactory: (CleanerConfig, util.List[File], ConcurrentMap[TopicPartition, UnifiedLog], LogDirFailureChannel, Time) => LogCleaner =
-                      (cleanerConfig, files, map, logDirFailureChannel, time) => new LogCleaner(cleanerConfig, files, map, logDirFailureChannel, time))
-  extends LogManager(logDirs,
+                      cleanerFactory: (CleanerConfig, util.List[File], ConcurrentMap[TopicPartition, UnifiedLog], LogDirFailureChannel, Time) => LogCleaner)
+  extends LogManager(
+    logDirs,
     initialOfflineDirs,
     configRepository,
     initialDefaultConfig,
@@ -81,9 +81,9 @@ class AsyncLogManager(logDirs: Seq[File],
     initialTaskDelayMs,
     cleanerFactory) with Logging {
 
-  private val bookkeeperStorageSingleton: Option[BookkeeperStorageSingleton] =
-    if (initialDefaultConfig.asyncLogMode) {
-      Some(new BookkeeperStorageSingleton(initialDefaultConfig))
+  private val bookkeeperStorageOpt: Option[BookkeeperStorage] =
+    if (initialDefaultConfig.asyncLogModeEnable) {
+      Some(new BookkeeperStorage(initialDefaultConfig))
     } else {
       None
     }
@@ -91,8 +91,6 @@ class AsyncLogManager(logDirs: Seq[File],
   override def asyncLogModeEnabled: Boolean = true
 
   private val asyncLogs = new util.concurrent.ConcurrentHashMap[TopicPartition, CompletableFuture[BookkeeperUnifiedLog]]()
-
-  private val lock = new Object()
 
   private val brokerId = initialDefaultConfig.getInt(ServerConfigs.BROKER_ID_CONFIG)
 
@@ -109,8 +107,15 @@ class AsyncLogManager(logDirs: Seq[File],
   override def startup(topicNames: Set[String], isStray: UnifiedLog => Boolean): Unit = {}
 
   override def getLog(topicPartition: TopicPartition, isFuture: Boolean): Option[UnifiedLog] = {
-    // TODO
-    throw new UnsupportedOperationException("AsyncLogManager does not support getLog")
+    val logFuture = asyncLogs.get(topicPartition)
+    if (logFuture != null) {
+      if (logFuture.isDone) {
+        return Some(logFuture.join())
+      } else {
+        return None
+      }
+    }
+    None
   }
 
   override def getOrCreateLog(topicPartition: TopicPartition, isNew: Boolean, isFuture: Boolean,
@@ -121,55 +126,64 @@ class AsyncLogManager(logDirs: Seq[File],
 
   override def getOrCreateLogAsync(topicPartition: TopicPartition, isNew: Boolean, isFuture: Boolean,
                                    topicId: Optional[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[BookkeeperUnifiedLog] = {
-    // Check if bookkeeperStorageSingleton is available
-    if (bookkeeperStorageSingleton.isEmpty) {
-      return util.concurrent.CompletableFuture.failedFuture(
+    // 参数验证...
+    if (bookkeeperStorageOpt.isEmpty) {
+      return CompletableFuture.failedFuture(
         new IllegalStateException("BookkeeperStorageSingleton is not initialized for async log mode"))
     }
 
-    var log = asyncLogs.get(topicPartition)
-    if (log != null) {
-      return log
-    }
-
-    // Check if the partition is hosted locally
+    // 检查是否本地托管...
     val isLocalHosted = metadataCacheOpt match {
       case Some(cache) =>
         val leaderAndIsr = cache.getLeaderAndIsr(topicPartition.topic(), topicPartition.partition())
         if (leaderAndIsr.isEmpty) {
-          return util.concurrent.CompletableFuture.failedFuture(Errors.UNKNOWN_TOPIC_OR_PARTITION.exception())
+          return CompletableFuture.failedFuture(Errors.UNKNOWN_TOPIC_OR_PARTITION.exception())
         }
         val leader = leaderAndIsr.get.leader
         leader == brokerId
       case None =>
         true
     }
+
     if (!isLocalHosted) {
-      return util.concurrent.CompletableFuture.failedFuture(Errors.NOT_LEADER_OR_FOLLOWER.exception())
+      return CompletableFuture.failedFuture(Errors.NOT_LEADER_OR_FOLLOWER.exception())
     }
 
-    var future: util.concurrent.CompletableFuture[BookkeeperUnifiedLog] = null
-    lock.synchronized {
-      log = asyncLogs.get(topicPartition)
-      if (log != null) {
-        return log
-      }
-      future = new util.concurrent.CompletableFuture()
-      asyncLogs.put(topicPartition, future)
-    }
+    // 使用 computeIfAbsent 原子性地获取或创建
+    asyncLogs.computeIfAbsent(topicPartition, _ => {
+      val future = new CompletableFuture[BookkeeperUnifiedLog]()
 
-    // Create the local log - inline calls to avoid Scala type inference issues with Java classes
-    val bookkeeperStorage = bookkeeperStorageSingleton.get
+      // 异步初始化
+      initializeLogAsync(topicPartition, topicId, future)
+
+      future
+    })
+  }
+
+  private def initializeLogAsync(topicPartition: TopicPartition,
+                                 topicId: Optional[Uuid],
+                                 future: CompletableFuture[BookkeeperUnifiedLog]): Unit = {
+    val bookkeeperStorage = bookkeeperStorageOpt.get
     val transactionIndex = new AsyncTransactionIndex(bookkeeperStorage.getMetadataStoreExtended, topicPartition)
-    val producerStateManager = new AsyncProducerStateManager(topicPartition, maxTransactionTimeoutMs, producerStateManagerConfig, time, bookkeeperStorage.getMetadataStoreExtended)
-    val ref = new AtomicReference[BookkeeperUnifiedLog]()
+    val producerStateManager = new AsyncProducerStateManager(topicPartition, maxTransactionTimeoutMs,
+      producerStateManagerConfig, time, bookkeeperStorage.getMetadataStoreExtended)
+
     val localLog = new BookkeeperLocalLog(initialDefaultConfig, scheduler, topicPartition, transactionIndex)
-    // Initialize the local log
+
     localLog.initializeAsync(bookkeeperStorage.getManagedLedgerFactory)
       .thenApply(_ => {
         try {
-          new BookkeeperUnifiedLog(localLog.logStartOffset(), localLog, brokerTopicStats, producerIdExpirationCheckIntervalMs,
-            null, producerStateManager, topicId, false, LogOffsetsListener.NO_OP_OFFSETS_LISTENER)
+          new BookkeeperUnifiedLog(
+            localLog.logStartOffset(),
+            localLog,
+            brokerTopicStats,
+            producerIdExpirationCheckIntervalMs,
+            null,
+            producerStateManager,
+            topicId,
+            false,
+            LogOffsetsListener.NO_OP_OFFSETS_LISTENER
+          )
         } catch {
           case t: Throwable =>
             error(s"Failed to initialize log for $topicPartition", t)
@@ -177,20 +191,19 @@ class AsyncLogManager(logDirs: Seq[File],
         }
       })
       .thenCompose(bookkeeperUnifiedLog => {
-        ref.set(bookkeeperUnifiedLog)
         bookkeeperUnifiedLog.initialize()
       })
-      .thenAccept(_ => {
-        future.complete(ref.get())
+      .thenAccept(bookkeeperUnifiedLog => {
+        future.complete(bookkeeperUnifiedLog)
       })
       .exceptionally(t => {
         error(s"Failed to initialize log for $topicPartition", t)
-        future.completeExceptionally(t)
+
+        // 初始化失败时从 map 中移除，允许后续重试
         asyncLogs.remove(topicPartition, future)
+        future.completeExceptionally(t)
         null
       })
-
-    future
   }
 
 
@@ -286,7 +299,7 @@ class AsyncLogManager(logDirs: Seq[File],
     log.close()
 
     val name = topicPartition.topic() + "-" + topicPartition.partition()
-    bookkeeperStorageSingleton.foreach(bookkeeperStorage => {
+    bookkeeperStorageOpt.foreach(bookkeeperStorage => {
       bookkeeperStorage.getManagedLedgerFactory.asyncDelete(name, new AsyncCallbacks.DeleteLedgerCallback {
 
         override def deleteLedgerComplete(ctx: Any): Unit = {
@@ -312,7 +325,7 @@ class AsyncLogManager(logDirs: Seq[File],
         val log = logFuture.join()
         log.closeAsync().thenAccept(_ => {
           val name = topicPartition.topic() + "-" + topicPartition.partition()
-          bookkeeperStorageSingleton.foreach(bookkeeperStorage => {
+          bookkeeperStorageOpt.foreach(bookkeeperStorage => {
             bookkeeperStorage.getManagedLedgerFactory.asyncDelete(name, new AsyncCallbacks.DeleteLedgerCallback {
               override def deleteLedgerComplete(ctx: Any): Unit = {
                 info(s"Deleted log for $topicPartition")
@@ -416,6 +429,8 @@ object AsyncLogManager {
       logDirFailureChannel = logDirFailureChannel,
       time = time,
       remoteStorageSystemEnable = config.remoteLogManagerConfig.isRemoteStorageSystemEnabled,
-      initialTaskDelayMs = config.logInitialTaskDelayMs)
+      initialTaskDelayMs = config.logInitialTaskDelayMs,
+      cleanerFactory = (cleanerConfig, files, map, logDirFailureChannel, time) =>
+        new LogCleaner(cleanerConfig, files, map, logDirFailureChannel, time))
   }
 }

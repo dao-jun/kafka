@@ -16,8 +16,6 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import org.apache.bookkeeper.client.MockedBookKeeperTestCase;
-import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.record.MemoryRecords;
@@ -39,6 +37,9 @@ import org.apache.kafka.storage.internals.log.ProducerStateManager;
 import org.apache.kafka.storage.internals.log.ProducerStateManagerConfig;
 import org.apache.kafka.storage.internals.log.VerificationGuard;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
+
+import org.apache.bookkeeper.client.MockedBookKeeperTestCase;
+import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;

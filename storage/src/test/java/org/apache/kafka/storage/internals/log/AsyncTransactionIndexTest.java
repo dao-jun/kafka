@@ -16,8 +16,10 @@
  */
 package org.apache.kafka.storage.internals.log;
 
-import com.google.common.collect.ImmutableList;
 import org.apache.kafka.common.TopicPartition;
+
+import com.google.common.collect.ImmutableList;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 

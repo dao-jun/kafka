@@ -20,7 +20,7 @@ package kafka.server
 import com.yammer.metrics.core.Meter
 import kafka.utils.Logging
 
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{CompletableFuture, TimeUnit}
 import org.apache.kafka.common.TopicIdPartition
 import org.apache.kafka.common.errors._
 import org.apache.kafka.common.protocol.Errors
@@ -158,21 +158,23 @@ class DelayedFetch(
       tp -> status.fetchInfo
     }.toBuffer
 
-    val logReadResults = replicaManager.readFromLog(
+    val logReadResultFutures = replicaManager.readFromLogAsync(
       params,
       fetchInfos,
       quota,
       readFromPurgatory = true
     )
 
-    val fetchPartitionData = logReadResults.map { case (tp, result) =>
-      val isReassignmentFetch = params.isFromFollower &&
-        replicaManager.isAddingReplica(tp.topicPartition, params.replicaId)
+    CompletableFuture.allOf(logReadResultFutures.map(result => result._2).toArray: _*)
+      .thenAccept(_ => {
+        val fetchPartitionData = logReadResultFutures.map { case (tp, result) =>
+          val isReassignmentFetch = params.isFromFollower &&
+            replicaManager.isAddingReplica(tp.topicPartition, params.replicaId)
 
-      tp -> result.toFetchPartitionData(isReassignmentFetch)
-    }
-
-    responseCallback(fetchPartitionData)
+          tp -> result.join().toFetchPartitionData(isReassignmentFetch)
+        }
+        responseCallback(fetchPartitionData)
+      })
   }
 }
 

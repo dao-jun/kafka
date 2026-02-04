@@ -16,12 +16,14 @@
  */
 package org.apache.kafka.storage.internals.log;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.log.remote.metadata.storage.generated.ProducerSnapshot;
+
+import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.pulsar.metadata.api.GetResult;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;

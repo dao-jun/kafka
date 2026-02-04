@@ -177,7 +177,7 @@ class Partition(val topicPartition: TopicPartition,
   def topic: String = topicPartition.topic
   def partitionId: Int = topicPartition.partition
 
-  private val asyncLogMode: Boolean = logManager.initialDefaultConfig.asyncLogMode
+  private val asyncLogModeEnable: Boolean = logManager.initialDefaultConfig.asyncLogModeEnable
 
   private val stateChangeLogger = new StateChangeLogger(localBrokerId)
   private val remoteReplicasMap = new ConcurrentHashMap[Int, Replica]
@@ -237,7 +237,7 @@ class Partition(val topicPartition: TopicPartition,
   // a false positive under min isr check, it has to check the leaderReplicaIdOpt again. Though it can still be affected
   // by ABA problems when leader->follower->leader, but it should be good enough for a metric.
   def isUnderMinIsr: Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     leaderLogIfLocal.exists { partitionState.isr.size < effectiveMinIsr(_) } && isLeader
@@ -249,7 +249,7 @@ class Partition(val topicPartition: TopicPartition,
  * is returned here.
  */
   private def effectiveMinIsr(leaderLog: UnifiedLog): Int = {
-      if (asyncLogMode) {
+      if (asyncLogModeEnable) {
         return 0
       }
       leaderLog.config.minInSyncReplicas.min(remoteReplicasMap.size + 1)
@@ -301,7 +301,7 @@ class Partition(val topicPartition: TopicPartition,
     * @return true iff the future replica is created
     */
   def maybeCreateFutureReplica(logDir: String, highWatermarkCheckpoints: OffsetCheckpoints, topicId: Option[Uuid] = topicId): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     // The writeLock is needed to make sure that while the caller checks the log directory of the
@@ -331,7 +331,7 @@ class Partition(val topicPartition: TopicPartition,
 
   def createLogIfNotExists(isNew: Boolean, isFutureReplica: Boolean, offsetCheckpoints: OffsetCheckpoints, topicId: Option[Uuid],
                            targetLogDirectoryId: Option[Uuid] = None): CompletableFuture[Unit] = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return createLogAsync(isNew, isFutureReplica, offsetCheckpoints, topicId, targetLogDirectoryId)
         .thenAccept(log => {
           this.log = Some(log)
@@ -735,7 +735,7 @@ class Partition(val topicPartition: TopicPartition,
                    highWatermarkCheckpoints: OffsetCheckpoints,
                    topicId: Option[Uuid],
                    targetLogDirectoryId: Option[Uuid] = None): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       // TODO Maybe we need to close the log and make it offline.
       return isNew
     }
@@ -786,7 +786,7 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   private def createLogInAssignedDirectoryId(isNew: Boolean, highWatermarkCheckpoints: OffsetCheckpoints, topicId: Option[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[Unit] = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return createLogIfNotExists(isNew, isFutureReplica = false, highWatermarkCheckpoints, topicId)
     }
 
@@ -820,7 +820,7 @@ class Partition(val topicPartition: TopicPartition,
     leaderEndOffset: Long,
     brokerEpoch: Long
   ): Unit = {
-    if(asyncLogMode) {
+    if(asyncLogModeEnable) {
       return
     }
 
@@ -926,7 +926,7 @@ class Partition(val topicPartition: TopicPartition,
    * This function can be triggered when a replica's LEO has incremented.
    */
   private def maybeExpandIsr(followerReplica: Replica): Unit = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return
     }
 
@@ -950,14 +950,14 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   private def needsExpandIsr(followerReplica: Replica): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     canAddReplicaToIsr(followerReplica.brokerId) && isFollowerInSync(followerReplica)
   }
 
   private def canAddReplicaToIsr(followerReplicaId: Int): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     val current = partitionState
@@ -1070,7 +1070,7 @@ class Partition(val topicPartition: TopicPartition,
    * @return true if the HW was incremented, and false otherwise.
    */
   private def maybeIncrementLeaderHW(leaderLog: UnifiedLog, currentTimeMs: Long = time.milliseconds): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       leaderLog.maybeIncrementHighWatermark(leaderLog.logEndOffsetMetadata)
       return true
     }
@@ -1153,7 +1153,7 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   def maybeShrinkIsr(): Unit = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return
     }
     def needsIsrUpdate: Boolean = {
@@ -1196,7 +1196,7 @@ class Partition(val topicPartition: TopicPartition,
   }
 
   private def needsShrinkIsr(): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     leaderLogIfLocal.exists { _ => getOutOfSyncReplicas(replicaLagTimeMaxMs).nonEmpty }
@@ -1206,7 +1206,7 @@ class Partition(val topicPartition: TopicPartition,
                                   leaderEndOffset: Long,
                                   currentTimeMs: Long,
                                   maxLagMs: Long): Boolean = {
-    if (asyncLogMode) {
+    if (asyncLogModeEnable) {
       return false
     }
     getReplica(replicaId).fold(true) { followerReplica =>
@@ -1228,7 +1228,7 @@ class Partition(val topicPartition: TopicPartition,
    * If an ISR update is in-flight, we will return an empty set here
    **/
   def getOutOfSyncReplicas(maxLagMs: Long): Set[Int] = {
-    if (logManager.initialDefaultConfig.asyncLogMode) {
+    if (asyncLogModeEnable) {
       return Set.empty
     }
     val current = partitionState
@@ -1294,6 +1294,39 @@ class Partition(val topicPartition: TopicPartition,
     }
   }
 
+
+  def appendRecordsToLeaderAsync(
+    records: MemoryRecords,
+    origin: AppendOrigin,
+    requiredAcks: Int,
+    requestLocal: RequestLocal,
+    verificationGuard: VerificationGuard = VerificationGuard.SENTINEL,
+    transactionVersion: Short = TransactionVersion.TV_UNKNOWN
+  ): CompletableFuture[LogAppendInfo] = {
+    if (asyncLogModeEnable) {
+      val infoFuture: CompletableFuture[LogAppendInfo] = leaderLogIfLocal match {
+        case Some(leaderLog) =>
+          leaderLog.appendAsLeaderAsync(records, this.leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion)
+            .thenApply(info => {
+              maybeIncrementLeaderHW(leaderLog)
+              info.copy(LeaderHwChange.INCREASED)
+            })
+        case None =>
+          CompletableFuture.failedFuture(new NotLeaderOrFollowerException("Leader not local for partition %s on broker %d"
+            .format(topicPartition, localBrokerId)))
+      }
+      return infoFuture
+    }
+
+    try {
+      CompletableFuture.completedFuture(
+        appendRecordsToLeader(records, origin, requiredAcks, requestLocal, verificationGuard, transactionVersion))
+    } catch {
+      case t: Throwable =>
+        CompletableFuture.failedFuture(t)
+    }
+  }
+
   def appendRecordsToLeader(
     records: MemoryRecords,
     origin: AppendOrigin,
@@ -1327,6 +1360,49 @@ class Partition(val topicPartition: TopicPartition,
     }
 
     info.copy(if (leaderHWIncremented) LeaderHwChange.INCREASED else LeaderHwChange.SAME)
+  }
+
+  def fetchRecordsAsync(
+    fetchParams: FetchParams,
+    fetchPartitionData: FetchRequest.PartitionData,
+    fetchTimeMs: Long,
+    maxBytes: Int,
+    minOneMessage: Boolean,
+    updateFetchState: Boolean
+  ): CompletableFuture[LogReadInfo] = {
+    if (asyncLogModeEnable) {
+      if (fetchParams.isFromFollower) {
+        return CompletableFuture.failedFuture(new UnsupportedVersionException("Async log mode does not support follower fetch"));
+      }
+      try {
+        val localLog = localLogOrException
+        val initialHighWatermark = localLog.highWatermark
+        val initialLogStartOffset = localLog.logStartOffset
+        val initialLogEndOffset = localLog.logEndOffset
+        val initialLastStableOffset = localLog.lastStableOffset
+        return localLog.readAsync(fetchPartitionData.fetchOffset, maxBytes, fetchParams.isolation, minOneMessage)
+          .thenApply(info => {
+            new LogReadInfo(
+              info,
+              Optional.empty(),
+              initialHighWatermark,
+              initialLogStartOffset,
+              initialLogEndOffset,
+              initialLastStableOffset
+            )
+          })
+      } catch {
+        case e: Throwable =>
+          return CompletableFuture.failedFuture(e)
+      }
+    }
+    try {
+      CompletableFuture.completedFuture(
+        fetchRecords(fetchParams, fetchPartitionData, fetchTimeMs, maxBytes, minOneMessage, updateFetchState))
+    } catch {
+      case t: Throwable =>
+        CompletableFuture.failedFuture(t)
+    }
   }
 
   /**
@@ -1506,6 +1582,58 @@ class Partition(val topicPartition: TopicPartition,
       initialLogEndOffset,
       initialLastStableOffset
     )
+  }
+
+
+  def fetchOffsetForTimestampAsync(timestamp: Long,
+                                   isolationLevel: Option[IsolationLevel],
+                                   currentLeaderEpoch: Optional[Integer],
+                                   fetchOnlyFromLeader: Boolean,
+                                   remoteLogManager: Option[RemoteLogManager] = None): CompletableFuture[OffsetResultHolder] = {
+    try {
+      val localLog = localLogWithEpochOrThrow(currentLeaderEpoch, fetchOnlyFromLeader)
+      val lastFetchableOffset = isolationLevel match {
+        case Some(IsolationLevel.READ_COMMITTED) => localLog.lastStableOffset
+        case Some(IsolationLevel.READ_UNCOMMITTED) => localLog.highWatermark
+        case None => localLog.logEndOffset
+      }
+      val epochLogString = if (currentLeaderEpoch.isPresent) {
+        s"epoch ${currentLeaderEpoch.get}"
+      } else {
+        "unknown epoch"
+      }
+      // Only consider throwing an error if we get a client request (isolationLevel is defined) and the high watermark
+      // is lagging behind the start offset
+      val maybeOffsetsError: Option[ApiException] = leaderEpochStartOffsetOpt
+        .filter(epochStart => isolationLevel.isDefined && epochStart > localLog.highWatermark)
+        .map(epochStart => Errors.OFFSET_NOT_AVAILABLE.exception(s"Failed to fetch offsets for " +
+          s"partition $topicPartition with leader $epochLogString as this partition's " +
+          s"high watermark (${localLog.highWatermark}) is lagging behind the " +
+          s"start offset from the beginning of this epoch ($epochStart)."))
+
+      def getOffsetByTimestamp: CompletableFuture[OffsetResultHolder] = {
+        logManager.getLog(topicPartition)
+          .map(log => log.fetchOffsetByTimestampAsync(timestamp, remoteLogManager.asInstanceOf[Option[AsyncOffsetReader]].toJava))
+          .getOrElse(CompletableFuture.completedFuture(new OffsetResultHolder(Optional.empty[FileRecords.TimestampAndOffset]())))
+      }
+      timestamp match {
+        case ListOffsetsRequest.LATEST_TIMESTAMP =>
+          maybeOffsetsError.map(e => throw e)
+            .getOrElse(CompletableFuture.completedFuture(new OffsetResultHolder(new TimestampAndOffset(RecordBatch.NO_TIMESTAMP, lastFetchableOffset, Optional.of(leaderEpoch)))))
+        case ListOffsetsRequest.EARLIEST_TIMESTAMP | ListOffsetsRequest.EARLIEST_LOCAL_TIMESTAMP =>
+          getOffsetByTimestamp
+        case _ =>
+          val offsetResultHolder = getOffsetByTimestamp
+          offsetResultHolder.thenApply(offsetResultHolder => {
+            offsetResultHolder.maybeOffsetsError(OptionConverters.toJava(maybeOffsetsError))
+            offsetResultHolder.lastFetchableOffset(Optional.of(lastFetchableOffset))
+            offsetResultHolder
+          })
+      }
+    } catch {
+      case e: Exception =>
+        CompletableFuture.failedFuture(e)
+    }
   }
 
   def fetchOffsetForTimestamp(timestamp: Long,

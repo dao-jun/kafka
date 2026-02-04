@@ -16,17 +16,17 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
+import org.apache.kafka.storage.internals.log.LogConfig;
+
 import com.github.benmanes.caffeine.cache.AsyncCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.annotations.VisibleForTesting;
-import io.netty.channel.EventLoopGroup;
-import io.opentelemetry.api.OpenTelemetry;
+
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactoryConfig;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.stats.NullStatsLogger;
-import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.pulsar.common.policies.data.EnsemblePlacementPolicyConfig;
 import org.apache.pulsar.common.stats.CacheMetricsCollector;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
@@ -36,6 +36,9 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
+
+import io.netty.channel.EventLoopGroup;
+import io.opentelemetry.api.OpenTelemetry;
 
 public class ManagedLedgerClientFactory {
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerClientFactory.class);

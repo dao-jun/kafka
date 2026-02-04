@@ -16,9 +16,10 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
+import org.apache.kafka.common.record.MemoryRecords;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import org.apache.kafka.common.record.MemoryRecords;
 
 public record RecordsDecodeResult(ByteBuf buf, int numEntries, MemoryRecords records) {
     private static final ByteBuf EMPTY_BUF = Unpooled.EMPTY_BUFFER;

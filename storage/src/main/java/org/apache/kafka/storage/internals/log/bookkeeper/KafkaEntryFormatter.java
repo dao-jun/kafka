@@ -16,13 +16,13 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import com.google.common.annotations.VisibleForTesting;
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.CompositeByteBuf;
-import org.apache.bookkeeper.mledger.Entry;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
+
+import com.google.common.annotations.VisibleForTesting;
+
+import org.apache.bookkeeper.mledger.Entry;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.protocol.Commands;
@@ -31,6 +31,9 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.List;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.CompositeByteBuf;
 
 import static org.apache.kafka.common.record.Records.OFFSET_LENGTH;
 

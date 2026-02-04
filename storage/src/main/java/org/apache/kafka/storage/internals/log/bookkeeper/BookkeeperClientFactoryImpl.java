@@ -16,15 +16,16 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
+import org.apache.kafka.storage.internals.log.LogConfig;
+
 import com.google.common.annotations.VisibleForTesting;
-import io.netty.channel.EventLoopGroup;
+
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.stats.StatsLogger;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.kafka.storage.internals.log.LogConfig;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.apache.pulsar.metadata.bookkeeper.AbstractMetadataDriver;
@@ -34,6 +35,8 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+
+import io.netty.channel.EventLoopGroup;
 
 public class BookkeeperClientFactoryImpl implements BookkeeperClientFactory  {
     @Override

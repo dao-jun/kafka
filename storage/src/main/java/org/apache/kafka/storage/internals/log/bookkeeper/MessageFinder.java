@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
@@ -38,7 +39,7 @@ public class MessageFinder implements AsyncCallbacks.FindEntryCallback {
     protected final String subName;
     protected final int ledgerCloseTimestampMaxClockSkewMillis;
     protected final String topicName;
-    protected long timestamp = 0;
+    protected volatile long timestamp = 0;
 
     protected static final int FALSE = 0;
     protected static final int TRUE = 1;

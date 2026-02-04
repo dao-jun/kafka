@@ -254,6 +254,8 @@ class ReplicaManager(val config: KafkaConfig,
       shareFetchPurgatoryName, delayedShareFetchTimer, config.brokerId,
       config.shareGroupConfig.shareFetchPurgatoryPurgeIntervalRequests))
 
+  def asyncLogModeEnable: Boolean = logManager.asyncLogModeEnabled
+
   /* epoch of the controller that last changed the leader */
   protected val localBrokerId = config.brokerId
   protected val allPartitions = new ConcurrentHashMap[TopicPartition, HostedPartition]
@@ -652,6 +654,23 @@ class ReplicaManager(val config: KafkaConfig,
     localProduceResultsWithTopicId
   }
 
+  def appendRecordsToLeaderAsync(
+    requiredAcks: Short,
+    internalTopicsAllowed: Boolean,
+    origin: AppendOrigin,
+    entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
+    requestLocal: RequestLocal = RequestLocal.noCaching,
+    actionQueue: ActionQueue = this.defaultActionQueue,
+    verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty,
+    transactionVersion: Short = TransactionVersion.TV_UNKNOWN
+    ): Map[TopicIdPartition, CompletableFuture[LogAppendResult]] = {
+    appendRecordsToLeader(requiredAcks, internalTopicsAllowed, origin, entriesPerPartition, requestLocal, actionQueue, verificationGuards, transactionVersion)
+      .map {
+        case (topicIdPartition, logAppendResult) =>
+          topicIdPartition -> CompletableFuture.completedFuture(logAppendResult)
+      }
+  }
+
   /**
    * Append messages to leader replicas of the partition, and wait for them to be replicated to other replicas;
    * the callback function will be triggered either when timeout or the required acks are satisfied;
@@ -874,7 +893,7 @@ class ReplicaManager(val config: KafkaConfig,
     )
   }
 
-  private def buildProducePartitionStatus(
+  protected def buildProducePartitionStatus(
     results: Map[TopicIdPartition, LogAppendResult]
   ): Map[TopicIdPartition, ProducePartitionStatus] = {
     results.map { case (topicIdPartition, result) =>
@@ -892,7 +911,7 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
-  private def addCompletePurgatoryAction(
+  protected def addCompletePurgatoryAction(
     actionQueue: ActionQueue,
     appendResults: Map[TopicIdPartition, LogAppendResult]
   ): Unit = {
@@ -917,7 +936,7 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
-  private def maybeAddDelayedProduce(
+  protected def maybeAddDelayedProduce(
     requiredAcks: Short,
     timeoutMs: Long,
     entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
@@ -1592,7 +1611,7 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
-  private def delayedRemoteListOffsetsRequired(responseByPartition: Map[TopicPartition, ListOffsetsPartitionStatus]): Boolean = {
+  protected def delayedRemoteListOffsetsRequired(responseByPartition: Map[TopicPartition, ListOffsetsPartitionStatus]): Boolean = {
     responseByPartition.values.exists(status => status.futureHolderOpt.isPresent)
   }
 
@@ -1603,6 +1622,14 @@ class ReplicaManager(val config: KafkaConfig,
                               fetchOnlyFromLeader: Boolean): OffsetResultHolder = {
     val partition = getPartitionOrException(topicPartition)
     partition.fetchOffsetForTimestamp(timestamp, isolationLevel, currentLeaderEpoch, fetchOnlyFromLeader, remoteLogManager)
+  }
+
+  def  fetchOffsetForTimestampAsync(topicPartition: TopicPartition,
+                                     timestamp: Long,
+                                     isolationLevel: Option[IsolationLevel],
+                                     currentLeaderEpoch: Optional[Integer],
+                                     fetchOnlyFromLeader: Boolean): CompletableFuture[OffsetResultHolder] = {
+    CompletableFuture.completedFuture(fetchOffsetForTimestamp(topicPartition, timestamp, isolationLevel, currentLeaderEpoch, fetchOnlyFromLeader))
   }
 
   /**
@@ -1761,6 +1788,18 @@ class ReplicaManager(val config: KafkaConfig,
     }
   }
 
+
+  def readFromLogAsync(
+    params: FetchParams,
+    readPartitionInfo: Seq[(TopicIdPartition, PartitionData)],
+    quota: ReplicaQuota,
+    readFromPurgatory: Boolean): Seq[(TopicIdPartition, CompletableFuture[LogReadResult])] = {
+    readFromLog(params, readPartitionInfo, quota, readFromPurgatory)
+      .map { case (topicIdPartition, logReadResult) =>
+      topicIdPartition -> CompletableFuture.completedFuture(logReadResult)
+    }
+  }
+
   /**
    * Read from multiple topic partitions at the given offset up to maxSize bytes
    */
@@ -1906,7 +1945,7 @@ class ReplicaManager(val config: KafkaConfig,
     result
   }
 
-  private def handleOffsetOutOfRangeError(tp: TopicIdPartition, params: FetchParams, fetchInfo: PartitionData,
+  protected def handleOffsetOutOfRangeError(tp: TopicIdPartition, params: FetchParams, fetchInfo: PartitionData,
                                           adjustedMaxBytes: Int, minOneMessage:
                                           Boolean, log: UnifiedLog, fetchTimeMs: Long,
                                           exception: OffsetOutOfRangeException): LogReadResult = {
@@ -2050,7 +2089,7 @@ class ReplicaManager(val config: KafkaConfig,
    * @param logTopicIdOpt the topic ID in the log if the log and the topic ID exist
    * @return true if the request topic id is consistent, false otherwise
    */
-  private def hasConsistentTopicId(requestTopicIdOpt: Option[Uuid], logTopicIdOpt: Option[Uuid]): Boolean = {
+  protected def hasConsistentTopicId(requestTopicIdOpt: Option[Uuid], logTopicIdOpt: Option[Uuid]): Boolean = {
     requestTopicIdOpt match {
       case None => true
       case Some(requestTopicId) => logTopicIdOpt.isEmpty || logTopicIdOpt.contains(requestTopicId)

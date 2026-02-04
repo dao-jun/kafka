@@ -74,6 +74,26 @@ class LogConfigTest {
       case TopicConfig.REMOTE_LOG_COPY_DISABLE_CONFIG => assertPropertyInvalid(name, "not_a_number", "remove", "0")
       case TopicConfig.REMOTE_LOG_DELETE_ON_DISABLE_CONFIG => assertPropertyInvalid(name, "not_a_number", "remove", "0")
       case LogConfig.INTERNAL_SEGMENT_BYTES_CONFIG => // no op
+      // INT configs with atLeast(-1) validator - -1 is valid (unlimited)
+      case "bookkeeper.retention.time.seconds" => // no op
+      case "bookkeeper.retention.size.mb" => // no op
+      // STRING configs with null default - accept any string value, skip number validation
+      case "bookkeeper.client.authentication.parameters" => // no op
+      case "bookkeeper.client.authentication.parameters.name" => // no op
+      case "bookkeeper.client.authentication.plugin" => // no op
+      case "bookkeeper.client.tls.certificate.file.path" => // no op
+      case "bookkeeper.client.tls.key.file.path" => // no op
+      case "bookkeeper.client.tls.key.file.type" => // no op
+      case "bookkeeper.client.tls.key.store.password.path" => // no op
+      case "bookkeeper.client.tls.provider.factory.class" => // no op
+      case "bookkeeper.client.tls.trust.certs.file.path" => // no op
+      case "bookkeeper.client.tls.trust.cert.types" => // no op
+      case "bookkeeper.client.tls.trust.store.password.path" => // no op
+      case "bookkeeper.client.metadata.service.url" => // no op
+      case "bookkeeper.digest.type" => // no op
+      case "bookkeeper.password" => // no op
+      case "bookkeeper.metadata.store.url" => // no op
+      case "ml.info.compression.type" => // no op
 
       case _ => assertPropertyInvalid(name, "not_a_number", "-1")
     })

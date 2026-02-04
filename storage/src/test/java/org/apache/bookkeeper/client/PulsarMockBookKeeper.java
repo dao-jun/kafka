@@ -17,8 +17,7 @@
 package org.apache.bookkeeper.client;
 
 import com.google.common.collect.Lists;
-import io.netty.util.concurrent.DefaultThreadFactory;
-import io.netty.util.concurrent.FastThreadLocal;
+
 import org.apache.bookkeeper.client.AsyncCallback.CreateCallback;
 import org.apache.bookkeeper.client.AsyncCallback.DeleteCallback;
 import org.apache.bookkeeper.client.AsyncCallback.OpenCallback;
@@ -62,6 +61,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+
+import io.netty.util.concurrent.DefaultThreadFactory;
+import io.netty.util.concurrent.FastThreadLocal;
 
 import static com.google.common.base.Preconditions.checkArgument;
 

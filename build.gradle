@@ -1106,6 +1106,8 @@ project(':core') {
     implementation libs.re2j
     implementation(libs.managedLedger) {
       exclude group: 'org.apache.logging.log4j', module: 'log4j-api'
+      exclude group: 'org.apache.pulsar', module: 'pulsar-client-api'
+      exclude group: 'org.apache.pulsar', module: 'pulsar-client-admin-api'
     }
 
     testImplementation project(':clients').sourceSets.test.output
@@ -2332,6 +2334,8 @@ project(':storage') {
     }
     implementation(libs.managedLedger) {
       exclude group: 'org.apache.logging.log4j', module: 'log4j-api'
+      exclude group: 'org.apache.pulsar', module: 'pulsar-client-api'
+      exclude group: 'org.apache.pulsar', module: 'pulsar-client-admin-api'
     }
     implementation log4j2Libs
     implementation libs.slf4jApi

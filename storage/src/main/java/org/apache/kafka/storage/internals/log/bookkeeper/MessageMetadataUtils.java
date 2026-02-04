@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import io.netty.buffer.ByteBuf;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.Position;
@@ -25,6 +24,8 @@ import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.protocol.Commands;
 
 import javax.annotation.Nullable;
+
+import io.netty.buffer.ByteBuf;
 
 public class MessageMetadataUtils {
     public static long getCurrentOffset(ManagedLedger managedLedger) {

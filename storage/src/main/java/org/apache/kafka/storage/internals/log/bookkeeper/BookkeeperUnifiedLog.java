@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
@@ -54,6 +53,9 @@ import org.apache.kafka.storage.internals.log.ProducerAppendInfo;
 import org.apache.kafka.storage.internals.log.UnifiedLog;
 import org.apache.kafka.storage.internals.log.VerificationGuard;
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats;
+
+import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,7 +74,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     private volatile BookkeeperLocalLog bookkeeperLocalLog;
     private final AtomicBoolean recovering = new AtomicBoolean(false);
-    private final CompletableFuture<Void> initializeFuture = new CompletableFuture<>();
+    private final CompletableFuture<BookkeeperUnifiedLog> initializeFuture = new CompletableFuture<>();
     private final AsyncTransactionIndex transactionIndex;
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -83,7 +85,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                                 boolean remoteStorageSystemEnable, LogOffsetsListener logOffsetsListener) throws IOException {
         super(logStartOffset, localLog, brokerTopicStats, producerIdExpirationCheckIntervalMs, leaderEpochCache,
                 producerStateManager, topicId, remoteStorageSystemEnable, logOffsetsListener);
-        this.transactionIndex = bookkeeperLocalLog.transactionIndex;
+        this.transactionIndex = localLog.transactionIndex;
     }
 
     @Override
@@ -148,7 +150,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
         return transactionIndex;
     }
 
-    public CompletableFuture<Void> initialize() {
+    public CompletableFuture<BookkeeperUnifiedLog> initialize() {
         if (!recovering.compareAndSet(false, true)) {
             return initializeFuture;
         }
@@ -173,7 +175,7 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                     long startRecoverOffset = Math.min(producerMapEndOffset, transactionMapEndOffset);
                     return bookkeeperLocalLog.recoverFrom(startRecoverOffset, new RecoveryRecordsConsumer());
                 })
-                .thenAccept(ignore -> initializeFuture.complete(null))
+                .thenAccept(ignore -> initializeFuture.complete(this))
                 .exceptionally(t -> {
                     log.error("Failed to recover log", t);
                     initializeFuture.completeExceptionally(t);
@@ -537,5 +539,50 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
     @Override
     public CompletableFuture<Void> deleteAsync() {
         return super.deleteAsync();
+    }
+
+
+    // --------------------------------------------------------------------------
+    //  Wrapper super read/write methods
+    @Override
+    public FetchDataInfo read(long startOffset, int maxLength, FetchIsolation isolation, boolean minOneMessage) throws IOException {
+        log.error("Reading from BookkeeperUnifiedLog is not supported");
+        return readAsync(startOffset, maxLength, isolation, minOneMessage).join();
+    }
+
+    @Override
+    public LogAppendInfo appendAsFollower(MemoryRecords records, int leaderEpoch) {
+        log.error("Appending to BookkeeperUnifiedLog is not supported");
+        return appendAsFollowerAsync(records, leaderEpoch).join();
+    }
+
+    @Override
+    public LogAppendInfo appendAsLeader(MemoryRecords records, int leaderEpoch) throws IOException {
+        log.error("Appending as leader to BookkeeperUnifiedLog is not supported due to underlying storage limitations.");
+        return appendAsLeaderAsync(records, leaderEpoch).join();
+    }
+
+    @Override
+    public LogAppendInfo appendAsLeader(MemoryRecords records, int leaderEpoch, AppendOrigin origin) throws IOException {
+        log.error("Appending as leader to BookkeeperUnifiedLog is not supported");
+        return appendAsLeaderAsync(records, leaderEpoch, origin).join();
+    }
+
+    @Override
+    public LogAppendInfo appendAsLeader(MemoryRecords records, int leaderEpoch, AppendOrigin origin, RequestLocal requestLocal, VerificationGuard verificationGuard, short transactionVersion) {
+        log.error("Appending as leader to BookkeeperUnifiedLog is not supported.");
+        return appendAsLeaderAsync(records, leaderEpoch, origin, requestLocal, verificationGuard, transactionVersion).join();
+    }
+
+    @Override
+    public LogAppendInfo appendAsLeaderWithRecordVersion(MemoryRecords records, int leaderEpoch, RecordVersion recordVersion) {
+        log.error("appendAsLeaderWithRecordVersion to BookkeeperUnifiedLog is not supported.");
+        return appendAsLeaderWithRecordVersionAsync(records, leaderEpoch, recordVersion).join();
+    }
+
+    @Override
+    public OffsetResultHolder fetchOffsetByTimestamp(long targetTimestamp, Optional<AsyncOffsetReader> remoteOffsetReader) {
+        log.error("fetchOffsetByTimestamp to BookkeeperUnifiedLog is not supported.");
+        return fetchOffsetByTimestampAsync(targetTimestamp, remoteOffsetReader).join();
     }
 }

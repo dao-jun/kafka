@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.log;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.server.log.remote.metadata.storage.generated.ProducerSnapshot;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 

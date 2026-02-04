@@ -16,18 +16,20 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
+import org.apache.kafka.storage.internals.log.LogConfig;
+
+import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.pulsar.metadata.api.MetadataStoreConfig;
+import org.apache.pulsar.metadata.api.MetadataStoreException;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.opentelemetry.api.OpenTelemetry;
-import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
-import org.apache.kafka.storage.internals.log.LogConfig;
-import org.apache.pulsar.metadata.api.MetadataStoreConfig;
-import org.apache.pulsar.metadata.api.MetadataStoreException;
-import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 
-public class BookkeeperStorageSingleton {
+public class BookkeeperStorage {
     private final LogConfig config;
     private final EventLoopGroup ioEventLoopGroup;
     private final MetadataStoreExtended metadataStoreExtended;
@@ -35,7 +37,7 @@ public class BookkeeperStorageSingleton {
     private final BookkeeperClientFactory clientFactory;
 
 
-    public BookkeeperStorageSingleton(LogConfig logConfig) throws Exception {
+    public BookkeeperStorage(LogConfig logConfig) throws Exception {
         this.config = logConfig;
         try {
             this.metadataStoreExtended = createMetadataStoreExtended();

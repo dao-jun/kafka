@@ -16,22 +16,6 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import com.google.common.base.Throwables;
-import io.netty.buffer.ByteBuf;
-import org.apache.bookkeeper.client.api.DigestType;
-import org.apache.bookkeeper.mledger.AsyncCallbacks;
-import org.apache.bookkeeper.mledger.Entry;
-import org.apache.bookkeeper.mledger.ManagedCursor;
-import org.apache.bookkeeper.mledger.ManagedLedger;
-import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
-import org.apache.bookkeeper.mledger.ManagedLedgerException;
-import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
-import org.apache.bookkeeper.mledger.Position;
-import org.apache.bookkeeper.mledger.PositionFactory;
-import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
-import org.apache.bookkeeper.mledger.impl.OpAddEntry;
-import org.apache.commons.lang3.RandomUtils;
-import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.FetchResponseData;
@@ -51,6 +35,23 @@ import org.apache.kafka.storage.internals.log.LogSegment;
 import org.apache.kafka.storage.internals.log.LogSegments;
 import org.apache.kafka.storage.internals.log.OffsetAndTimestampIndex;
 import org.apache.kafka.storage.internals.log.TxnIndexSearchResult;
+
+import com.google.common.base.Throwables;
+
+import org.apache.bookkeeper.client.api.DigestType;
+import org.apache.bookkeeper.mledger.AsyncCallbacks;
+import org.apache.bookkeeper.mledger.Entry;
+import org.apache.bookkeeper.mledger.ManagedCursor;
+import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
+import org.apache.bookkeeper.mledger.ManagedLedgerException;
+import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
+import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
+import org.apache.bookkeeper.mledger.impl.OpAddEntry;
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -71,6 +72,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+
+import io.netty.buffer.ByteBuf;
 
 public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEntryCallback, AsyncCallbacks.OpenLedgerCallback {
     private static final Logger log = LoggerFactory.getLogger(BookkeeperLocalLog.class);
@@ -238,6 +241,11 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
     @Override
     public void close() {
         closeHandlers();
+    }
+
+    @Override
+    public void flush(long offset) {
+        // no-op
     }
 
     @Override

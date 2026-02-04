@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import io.netty.buffer.ByteBuf;
-import org.apache.bookkeeper.mledger.Position;
 import org.apache.kafka.common.protocol.Errors;
+
+import org.apache.bookkeeper.mledger.Position;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
+
+import io.netty.buffer.ByteBuf;
 
 public class MessagePublishContext {
     private static final Logger log = LoggerFactory.getLogger(MessagePublishContext.class);
