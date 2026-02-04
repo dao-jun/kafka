@@ -23,8 +23,7 @@ import java.nio.file.{Files, NoSuchFileException}
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicInteger
 import kafka.server.{KafkaConfig, KafkaRaftServer}
-import kafka.utils.threadsafe
-import kafka.utils.{CoreUtils, Logging}
+import kafka.utils.Logging
 import org.apache.kafka.common.{DirectoryId, KafkaException, TopicPartition, Uuid}
 import org.apache.kafka.common.utils.{Exit, KafkaThread, Time, Utils}
 import org.apache.kafka.common.errors.{InconsistentTopicIdException, KafkaStorageException, LogDirNotFoundException}
@@ -58,8 +57,9 @@ import java.util.stream.Collectors
  * size or I/O rate.
  *
  * A background thread handles log retention by periodically truncating excess log segments.
+ *
+ * This class is thread-safe.
  */
-@threadsafe
 class LogManager(logDirs: Seq[File],
                  initialOfflineDirs: Seq[File],
                  configRepository: ConfigRepository,
@@ -256,7 +256,7 @@ class LogManager(logDirs: Seq[File],
 
       warn(s"Logs for partitions ${offlineCurrentTopicPartitions.mkString(",")} are offline and " +
            s"logs for future partitions ${offlineFutureTopicPartitions.mkString(",")} are offline due to failure on log directory $dir")
-      dirLocks.filter(_.file.getParent == dir).foreach(dir => CoreUtils.swallow(dir.destroy(), this))
+      dirLocks.filter(_.file.getParent == dir).foreach(dir => Utils.swallow(this.logger.underlying, () => dir.destroy()))
     }
   }
 
@@ -659,7 +659,7 @@ class LogManager(logDirs: Seq[File],
 
     // stop the cleaner first
     if (cleaner != null) {
-      CoreUtils.swallow(cleaner.shutdown(), this)
+      Utils.swallow(this.logger.underlying, () => cleaner.shutdown())
     }
 
     val localLogsByDir = logsByDir
@@ -707,7 +707,7 @@ class LogManager(logDirs: Seq[File],
               loadLogsCompletedFlags.getOrDefault(logDirAbsolutePath, false)) {
             val cleanShutdownFileHandler = new CleanShutdownFileHandler(dir.getPath)
             debug(s"Writing clean shutdown marker at $dir with broker epoch=$brokerEpoch")
-            CoreUtils.swallow(cleanShutdownFileHandler.write(brokerEpoch), this)
+            Utils.swallow(this.logger.underlying, () => cleanShutdownFileHandler.write(brokerEpoch))
           }
         }
       }
@@ -1255,9 +1255,13 @@ class LogManager(logDirs: Seq[File],
     try {
       sourceLog.foreach { srcLog =>
         srcLog.renameDir(UnifiedLog.logDeleteDirName(topicPartition), true)
-        // Now that replica in source log directory has been successfully renamed for deletion.
-        // Close the log, update checkpoint files, and enqueue this log to be deleted.
-        srcLog.close()
+        // Now that replica in source log directory has been successfully renamed for deletion,
+        // update checkpoint files and enqueue this log to be deleted.
+        // Note: We intentionally do NOT close the log here to avoid race conditions where concurrent
+        // operations (e.g., log flusher, fetch requests) might encounter ClosedChannelException.
+        // The log will be deleted asynchronously by the background delete-logs thread.
+        // File handles are intentionally left open; Unix semantics allow the renamed files
+        // to remain accessible until all handles are closed.
         val logDir = srcLog.parentDirFile
         val logsToCheckpoint = logsInDir(logDir)
         checkpointRecoveryOffsetsInDir(logDir, logsToCheckpoint)
