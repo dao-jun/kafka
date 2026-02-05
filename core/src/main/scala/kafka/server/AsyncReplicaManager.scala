@@ -472,7 +472,7 @@ class AsyncReplicaManager(override val config: KafkaConfig,
                 Errors.NONE
               )
             })
-            .exceptionally(t => {
+            .exceptionally((t: Throwable) => {
               handleFetchMessageError(t, tp, params, fetchInfo, adjustedMaxBytes, minOneMessage, log, fetchTimeMs)
             })
         }

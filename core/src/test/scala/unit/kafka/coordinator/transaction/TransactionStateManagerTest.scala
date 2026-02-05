@@ -18,7 +18,7 @@ package kafka.coordinator.transaction
 
 import java.lang.management.ManagementFactory
 import java.nio.ByteBuffer
-import java.util.concurrent.{ConcurrentHashMap, CountDownLatch}
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, CountDownLatch}
 import javax.management.ObjectName
 import kafka.server.ReplicaManager
 import kafka.utils.TestUtils
@@ -179,6 +179,11 @@ class TransactionStateManagerTest {
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true))
     ).thenReturn(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock))
+    when(logMock.readAsync(ArgumentMatchers.eq(startOffset),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true))
+    ).thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock)))
     when(replicaManager.getLogEndOffset(topicPartition)).thenReturn(Some(endOffset))
 
     txnMetadata1.state(TransactionState.PREPARE_COMMIT)
@@ -238,6 +243,11 @@ class TransactionStateManagerTest {
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true))
     ).thenReturn(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock))
+    when(logMock.readAsync(ArgumentMatchers.eq(startOffset),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true))
+    ).thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock)))
     when(replicaManager.getLogEndOffset(topicPartition)).thenReturn(Some(endOffset))
 
     txnMetadata1.state(TransactionState.PREPARE_COMMIT)
@@ -1001,6 +1011,11 @@ class TransactionStateManagerTest {
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true))
     ).thenReturn(new FetchDataInfo(new LogOffsetMetadata(startOffset), MemoryRecords.EMPTY))
+    when(logMock.readAsync(ArgumentMatchers.eq(startOffset),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true))
+    ).thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(startOffset), MemoryRecords.EMPTY)))
     when(replicaManager.getLogEndOffset(topicPartition)).thenReturn(Some(endOffset))
 
     transactionManager.loadTransactionsForTxnTopicPartition(partitionId, coordinatorEpoch = 0, (_, _, _, _) => ())
@@ -1010,11 +1025,11 @@ class TransactionStateManagerTest {
 
     verify(replicaManager).getLog(topicPartition)
     verify(logMock).logStartOffset
-    verify(logMock).read(ArgumentMatchers.eq(startOffset),
+    verify(logMock).readAsync(ArgumentMatchers.eq(startOffset),
       anyInt(),
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true))
-    verify(replicaManager, times(2)).getLogEndOffset(topicPartition)
+    verify(replicaManager, times(1)).getLogEndOffset(topicPartition)
     assertEquals(0, transactionManager.loadingPartitions.size)
   }
 
@@ -1070,6 +1085,16 @@ class TransactionStateManagerTest {
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true)))
       .thenReturn(new FetchDataInfo(new LogOffsetMetadata(2L), secondSegmentRecords))
+    when(logMock.readAsync(ArgumentMatchers.eq(0L),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true)))
+      .thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(0L), firstSegmentRecords)))
+    when(logMock.readAsync(ArgumentMatchers.eq(2L),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true)))
+      .thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(2L), secondSegmentRecords)))
 
     // Load transactions should not stuck.
     transactionManager.loadTransactionsForTxnTopicPartition(partitionId, coordinatorEpoch = 1, (_, _, _, _) => ())
@@ -1246,6 +1271,11 @@ class TransactionStateManagerTest {
       ArgumentMatchers.eq(FetchIsolation.LOG_END),
       ArgumentMatchers.eq(true)))
       .thenReturn(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock))
+    when(logMock.readAsync(ArgumentMatchers.eq(startOffset),
+      anyInt(),
+      ArgumentMatchers.eq(FetchIsolation.LOG_END),
+      ArgumentMatchers.eq(true)))
+      .thenReturn(CompletableFuture.completedFuture(new FetchDataInfo(new LogOffsetMetadata(startOffset), fileRecordsMock)))
 
     when(fileRecordsMock.sizeInBytes()).thenReturn(records.sizeInBytes)
 

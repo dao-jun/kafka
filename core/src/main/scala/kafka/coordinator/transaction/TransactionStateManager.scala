@@ -18,7 +18,7 @@ package kafka.coordinator.transaction
 
 import java.nio.ByteBuffer
 import java.util.Properties
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kafka.server.ReplicaManager
@@ -42,7 +42,7 @@ import org.apache.kafka.server.record.BrokerCompressionType
 import org.apache.kafka.server.storage.log.FetchIsolation
 import org.apache.kafka.server.util.Scheduler
 import org.apache.kafka.server.util.LockUtils.{inReadLock, inWriteLock}
-import org.apache.kafka.storage.internals.log.AppendOrigin
+import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, UnifiedLog}
 import com.google.re2j.{Pattern, PatternSyntaxException}
 import org.apache.kafka.common.errors.InvalidRegularExpression
 
@@ -444,96 +444,136 @@ class TransactionStateManager(brokerId: Int,
 
   def partitionFor(transactionalId: String): Int = Utils.abs(transactionalId.hashCode) % transactionTopicPartitionCount
 
-  private def loadTransactionMetadata(topicPartition: TopicPartition, coordinatorEpoch: Int): ConcurrentMap[String, TransactionMetadata] =  {
-    def logEndOffset = replicaManager.getLogEndOffset(topicPartition).getOrElse(-1L)
+  /**
+   * Internal state class for async loading of transaction metadata.
+   * Used to pass state between recursive async calls.
+   *
+   * Thread safety note: This class is accessed sequentially in a chain of async callbacks.
+   * Each callback completes before the next one starts, so no concurrent access occurs.
+   * The mutable `buffer` field is safe because of this sequential access pattern.
+   */
+  private class AsyncLoadingState(
+    val topicPartition: TopicPartition,
+    val coordinatorEpoch: Int,
+    val log: UnifiedLog,
+    val loadedTransactions: ConcurrentHashMap[String, TransactionMetadata],
+    val resultFuture: CompletableFuture[ConcurrentMap[String, TransactionMetadata]]
+    ) {
+    var buffer: ByteBuffer = ByteBuffer.allocate(0)
+  }
 
+  private def loadTransactionMetadataAsync(topicPartition: TopicPartition, coordinatorEpoch: Int): CompletableFuture[ConcurrentMap[String, TransactionMetadata]] = {
     val loadedTransactions = new ConcurrentHashMap[String, TransactionMetadata]
+    val resultFuture = new CompletableFuture[ConcurrentMap[String, TransactionMetadata]]
 
     replicaManager.getLog(topicPartition) match {
       case None =>
         warn(s"Attempted to load transaction metadata from $topicPartition, but found no log")
+        resultFuture.complete(loadedTransactions)
 
       case Some(log) =>
-        // buffer may not be needed if records are read from memory
-        var buffer = ByteBuffer.allocate(0)
-
-        // loop breaks if leader changes at any time during the load, since logEndOffset is -1
-        var currOffset = log.logStartOffset
-
-        // loop breaks if no records have been read, since the end of the log has been reached
-        var readAtLeastOneRecord = true
-
-        try {
-          while (currOffset < logEndOffset && readAtLeastOneRecord && !shuttingDown.get() && inReadLock(stateLock, () => {
-            loadingPartitions.exists { idAndEpoch: TransactionPartitionAndLeaderEpoch =>
-              idAndEpoch.txnPartitionId == topicPartition.partition && idAndEpoch.coordinatorEpoch == coordinatorEpoch}})) {
-            val fetchDataInfo = log.read(currOffset, config.transactionLogLoadBufferSize, FetchIsolation.LOG_END, true)
-
-            readAtLeastOneRecord = fetchDataInfo.records.sizeInBytes > 0
-
-            val memRecords = (fetchDataInfo.records: @unchecked) match {
-              case records: MemoryRecords => records
-              case fileRecords: FileRecords =>
-                val sizeInBytes = fileRecords.sizeInBytes
-                val bytesNeeded = Math.max(config.transactionLogLoadBufferSize, sizeInBytes)
-
-                // minOneMessage = true in the above log.read means that the buffer may need to be grown to ensure progress can be made
-                if (buffer.capacity < bytesNeeded) {
-                  if (config.transactionLogLoadBufferSize < bytesNeeded)
-                    warn(s"Loaded transaction metadata from $topicPartition with buffer larger ($bytesNeeded bytes) than " +
-                      s"configured transaction.state.log.load.buffer.size (${config.transactionLogLoadBufferSize} bytes)")
-
-                  buffer = ByteBuffer.allocate(bytesNeeded)
-                } else {
-                  buffer.clear()
-                }
-                buffer.clear()
-                fileRecords.readInto(buffer, 0)
-                MemoryRecords.readableRecords(buffer)
-            }
-            memRecords.batches.forEach { batch =>
-              for (record <- batch.asScala) {
-                require(record.hasKey, "Transaction state log's key should not be null")
-                val transactionalId = try Some(TransactionLog.readTxnRecordKey(record.key))
-                catch {
-                  case e: IllegalStateException =>
-                    warn(s"Unknown message key version while loading transaction state from $topicPartition. " +
-                      s"Ignoring it. It could be a left over from an aborted upgrade", e)
-                    None
-                }
-                transactionalId.foreach { txnId =>
-                  // load transaction metadata along with transaction state
-                  val txnMetadata = TransactionLog.readTxnRecordValue(txnId, record.value)
-                  if (txnMetadata == null) {
-                    loadedTransactions.remove(txnId)
-                  } else {
-                    loadedTransactions.put(txnId, txnMetadata)
-                  }
-                }
-              }
-              currOffset = batch.nextOffset
-            }
-          }
-        } catch {
-          case t: Throwable => error(s"Error loading transactions from transaction log $topicPartition", t)
-        }
+        val state = new AsyncLoadingState(topicPartition, coordinatorEpoch, log, loadedTransactions, resultFuture)
+        loadNextBatchAsync(state, log.logStartOffset)
     }
 
-    loadedTransactions
+    resultFuture
+  }
+
+  private def loadNextBatchAsync(state: AsyncLoadingState, currOffset: Long): Unit = {
+    def logEndOffset = replicaManager.getLogEndOffset(state.topicPartition).getOrElse(-1L)
+
+    val shouldContinue = currOffset < logEndOffset &&
+      !shuttingDown.get() &&
+      inReadLock(stateLock, () => {
+        loadingPartitions.exists { idAndEpoch: TransactionPartitionAndLeaderEpoch =>
+          idAndEpoch.txnPartitionId == state.topicPartition.partition &&
+            idAndEpoch.coordinatorEpoch == state.coordinatorEpoch
+        }
+      })
+
+    if (!shouldContinue) {
+      state.resultFuture.complete(state.loadedTransactions)
+      return
+    }
+
+    // Use handle to process both success and failure cases uniformly.
+    // This ensures resultFuture.complete is called exactly once.
+    state.log.readAsync(currOffset, config.transactionLogLoadBufferSize, FetchIsolation.LOG_END, true)
+      .handle[Unit] { (fetchDataInfo: FetchDataInfo, throwable: Throwable) =>
+        if (throwable != null) {
+          error(s"Error loading transactions from transaction log ${state.topicPartition}", throwable)
+          // On error, return whatever we've loaded so far (consistent with original sync behavior)
+          state.resultFuture.complete(state.loadedTransactions)
+        } else {
+          try {
+            processFetchedData(state, currOffset, fetchDataInfo)
+          } catch {
+            case t: Throwable =>
+              error(s"Error processing transaction records from ${state.topicPartition}", t)
+              // On processing error, return whatever we've loaded so far
+              state.resultFuture.complete(state.loadedTransactions)
+          }
+        }
+      }
   }
 
   /**
-   * Add a transaction topic partition into the cache
+   * Process fetched data from the transaction log.
+   * Either completes the resultFuture or triggers loading of the next batch.
    */
-  private[transaction] def addLoadedTransactionsToCache(txnTopicPartition: Int,
-                                                        coordinatorEpoch: Int,
-                                                        loadedTransactions: ConcurrentMap[String, TransactionMetadata]): Unit = {
-    val txnMetadataCacheEntry = TxnMetadataCacheEntry(coordinatorEpoch, loadedTransactions)
-    val previousTxnMetadataCacheEntryOpt = transactionMetadataCache.put(txnTopicPartition, txnMetadataCacheEntry)
+  private def processFetchedData(state: AsyncLoadingState, currOffset: Long, fetchDataInfo: FetchDataInfo): Unit = {
+    val readAtLeastOneRecord = fetchDataInfo.records.sizeInBytes > 0
+    if (!readAtLeastOneRecord) {
+      // No more data to read, complete the loading
+      state.resultFuture.complete(state.loadedTransactions)
+    } else {
+      val memRecords = (fetchDataInfo.records: @unchecked) match {
+        case records: MemoryRecords => records
+        case fileRecords: FileRecords =>
+          val sizeInBytes = fileRecords.sizeInBytes
+          val bytesNeeded = Math.max(config.transactionLogLoadBufferSize, sizeInBytes)
 
-    previousTxnMetadataCacheEntryOpt.foreach { previousTxnMetadataCacheEntry =>
-      warn(s"Unloaded transaction metadata $previousTxnMetadataCacheEntry from $txnTopicPartition as part of " +
-        s"loading metadata at epoch $coordinatorEpoch")
+          if (state.buffer.capacity < bytesNeeded) {
+            if (config.transactionLogLoadBufferSize < bytesNeeded)
+              warn(s"Loaded transaction metadata from ${state.topicPartition} with buffer larger ($bytesNeeded bytes) than " +
+                s"configured transaction.state.log.load.buffer.size (${config.transactionLogLoadBufferSize} bytes)")
+
+            state.buffer = ByteBuffer.allocate(bytesNeeded)
+          } else {
+            state.buffer.clear()
+          }
+          state.buffer.clear()
+          fileRecords.readInto(state.buffer, 0)
+          MemoryRecords.readableRecords(state.buffer)
+      }
+
+      var nextOffset = currOffset
+      memRecords.batches.forEach { batch =>
+        for (record <- batch.asScala) {
+          require(record.hasKey, "Transaction state log's key should not be null")
+          val transactionalId = try Some(TransactionLog.readTxnRecordKey(record.key))
+          catch {
+            case e: IllegalStateException =>
+              warn(s"Unknown message key version while loading transaction state from ${state.topicPartition}. " +
+                s"Ignoring it. It could be a left over from an aborted upgrade", e)
+              None
+          }
+          transactionalId.foreach { txnId =>
+            val txnMetadata = TransactionLog.readTxnRecordValue(txnId, record.value)
+            if (txnMetadata == null) {
+              state.loadedTransactions.remove(txnId)
+            } else {
+              state.loadedTransactions.put(txnId, txnMetadata)
+            }
+          }
+        }
+        nextOffset = batch.nextOffset
+      }
+
+      // Continue loading the next batch.
+      // Direct recursion is safe here because we're already in an async callback context.
+      // Each readAsync().handle() creates a new async chain, not a stack frame.
+      loadNextBatchAsync(state, nextOffset)
     }
   }
 
@@ -555,52 +595,90 @@ class TransactionStateManager(brokerId: Int,
       info(s"Loading transaction metadata from $topicPartition at epoch $coordinatorEpoch")
       validateTransactionTopicPartitionCountIsStable()
 
-      val loadedTransactions = loadTransactionMetadata(topicPartition, coordinatorEpoch)
-      val endTimeMs = time.milliseconds()
-      val totalLoadingTimeMs = endTimeMs - startTimeMs
-      partitionLoadSensor.record(totalLoadingTimeMs.toDouble, endTimeMs, false)
-      info(s"Finished loading ${loadedTransactions.size} transaction metadata from $topicPartition in " +
-        s"$totalLoadingTimeMs milliseconds, of which $schedulerTimeMs milliseconds was spent in the scheduler.")
-
-      inWriteLock[Exception](stateLock, () => {
-        if (loadingPartitions.contains(partitionAndLeaderEpoch)) {
-          addLoadedTransactionsToCache(topicPartition.partition, coordinatorEpoch, loadedTransactions)
-
-          val transactionsPendingForCompletion = new mutable.ListBuffer[TransactionalIdCoordinatorEpochAndTransitMetadata]
-          loadedTransactions.forEach((transactionalId, txnMetadata) => {
-            txnMetadata.inLock(() => {
-              // if state is PrepareCommit or PrepareAbort we need to complete the transaction
-              txnMetadata.state match {
-                case TransactionState.PREPARE_ABORT =>
-                  transactionsPendingForCompletion +=
-                    TransactionalIdCoordinatorEpochAndTransitMetadata(transactionalId, coordinatorEpoch, TransactionResult.ABORT, txnMetadata, txnMetadata.prepareComplete(time.milliseconds()))
-                case TransactionState.PREPARE_COMMIT =>
-                  transactionsPendingForCompletion +=
-                    TransactionalIdCoordinatorEpochAndTransitMetadata(transactionalId, coordinatorEpoch, TransactionResult.COMMIT, txnMetadata, txnMetadata.prepareComplete(time.milliseconds()))
-                case _ =>
-                // nothing needs to be done
-              }
+      // Use async method to load transaction metadata
+      loadTransactionMetadataAsync(topicPartition, coordinatorEpoch)
+        .handle[Unit] { (loadedTransactions: ConcurrentMap[String, TransactionMetadata], throwable: Throwable) =>
+          if (throwable != null) {
+            error(s"Failed to load transaction metadata from $topicPartition", throwable)
+            inWriteLock[Exception](stateLock, () => {
+              loadingPartitions.remove(partitionAndLeaderEpoch)
             })
-          })
-
-          // we first remove the partition from loading partition then send out the markers for those pending to be
-          // completed transactions, so that when the markers get sent the attempt of appending the complete transaction
-          // log would not be blocked by the coordinator loading error
-          loadingPartitions.remove(partitionAndLeaderEpoch)
-
-          transactionsPendingForCompletion.foreach { txnTransitMetadata =>
-            info(s"Sending txn markers for $txnTransitMetadata after loading partition $partitionId")
-            sendTxnMarkers(txnTransitMetadata.coordinatorEpoch, txnTransitMetadata.result,
-              txnTransitMetadata.txnMetadata, txnTransitMetadata.transitMetadata)
+          } else {
+            onTransactionsLoaded(topicPartition, partitionId, coordinatorEpoch, partitionAndLeaderEpoch,
+              startTimeMs, schedulerTimeMs, loadedTransactions, sendTxnMarkers)
           }
         }
-      })
-
-      info(s"Completed loading transaction metadata from $topicPartition for coordinator epoch $coordinatorEpoch")
     }
 
     val scheduleStartMs = time.milliseconds()
     scheduler.scheduleOnce(s"load-txns-for-partition-$topicPartition", () => loadTransactions(scheduleStartMs))
+  }
+
+  /**
+   * Callback invoked after transaction metadata has been loaded successfully.
+   */
+  private def onTransactionsLoaded(
+    topicPartition: TopicPartition,
+    partitionId: Int,
+    coordinatorEpoch: Int,
+    partitionAndLeaderEpoch: TransactionPartitionAndLeaderEpoch,
+    startTimeMs: Long,
+    schedulerTimeMs: Long,
+    loadedTransactions: ConcurrentMap[String, TransactionMetadata],
+    sendTxnMarkers: SendTxnMarkersCallback
+    ): Unit = {
+    val endTimeMs = time.milliseconds()
+    val totalLoadingTimeMs = endTimeMs - startTimeMs
+    partitionLoadSensor.record(totalLoadingTimeMs.toDouble, endTimeMs, false)
+    info(s"Finished loading ${loadedTransactions.size} transaction metadata from $topicPartition in " +
+      s"$totalLoadingTimeMs milliseconds, of which $schedulerTimeMs milliseconds was spent in the scheduler.")
+
+    inWriteLock[Exception](stateLock, () => {
+      if (loadingPartitions.contains(partitionAndLeaderEpoch)) {
+        addLoadedTransactionsToCache(topicPartition.partition, coordinatorEpoch, loadedTransactions)
+
+        val transactionsPendingForCompletion = new mutable.ListBuffer[TransactionalIdCoordinatorEpochAndTransitMetadata]
+        loadedTransactions.forEach((transactionalId, txnMetadata) => {
+          txnMetadata.inLock(() => {
+            txnMetadata.state match {
+              case TransactionState.PREPARE_ABORT =>
+                transactionsPendingForCompletion +=
+                  TransactionalIdCoordinatorEpochAndTransitMetadata(transactionalId, coordinatorEpoch, TransactionResult.ABORT, txnMetadata, txnMetadata.prepareComplete(time.milliseconds()))
+              case TransactionState.PREPARE_COMMIT =>
+                transactionsPendingForCompletion +=
+                  TransactionalIdCoordinatorEpochAndTransitMetadata(transactionalId, coordinatorEpoch, TransactionResult.COMMIT, txnMetadata, txnMetadata.prepareComplete(time.milliseconds()))
+              case _ =>
+              // nothing needs to be done
+            }
+          })
+        })
+
+        loadingPartitions.remove(partitionAndLeaderEpoch)
+
+        transactionsPendingForCompletion.foreach { txnTransitMetadata =>
+          info(s"Sending txn markers for $txnTransitMetadata after loading partition $partitionId")
+          sendTxnMarkers(txnTransitMetadata.coordinatorEpoch, txnTransitMetadata.result,
+            txnTransitMetadata.txnMetadata, txnTransitMetadata.transitMetadata)
+        }
+      }
+    })
+
+    info(s"Completed loading transaction metadata from $topicPartition for coordinator epoch $coordinatorEpoch")
+  }
+
+  /**
+   * Add a transaction topic partition into the cache
+   */
+  private[transaction] def addLoadedTransactionsToCache(txnTopicPartition: Int,
+                                                        coordinatorEpoch: Int,
+                                                        loadedTransactions: ConcurrentMap[String, TransactionMetadata]): Unit = {
+    val txnMetadataCacheEntry = TxnMetadataCacheEntry(coordinatorEpoch, loadedTransactions)
+    val previousTxnMetadataCacheEntryOpt = transactionMetadataCache.put(txnTopicPartition, txnMetadataCacheEntry)
+
+    previousTxnMetadataCacheEntryOpt.foreach { previousTxnMetadataCacheEntry =>
+      warn(s"Unloaded transaction metadata $previousTxnMetadataCacheEntry from $txnTopicPartition as part of " +
+        s"loading metadata at epoch $coordinatorEpoch")
+    }
   }
 
   def removeTransactionsForTxnTopicPartition(partitionId: Int): Unit = {
