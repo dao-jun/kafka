@@ -16,37 +16,37 @@
 # limitations under the License.
 ###############################################################################
 
-FROM eclipse-temurin:21-jre-alpine AS build-jsa
-
-USER root
-
-# Get kafka from https://archive.apache.org/dist/kafka and pass the url through build arguments
-ARG kafka_url
-
-COPY jsa_launch /etc/kafka/docker/jsa_launch
-COPY server.properties /etc/kafka/docker/server.properties
-
-COPY *kafka.tgz kafka.tgz
-
-RUN set -eux ; \
-    apk update ; \
-    apk upgrade ; \
-    apk add --no-cache bash; \
-    mkdir opt/kafka; \
-    if [ -n "$kafka_url" ]; then \
-        apk add --no-cache wget gcompat gpg gpg-agent procps; \
-        wget -nv -O kafka.tgz "$kafka_url"; \
-        wget -nv -O kafka.tgz.asc "$kafka_url.asc"; \
-        wget -nv -O KEYS https://downloads.apache.org/kafka/KEYS; \
-        tar xfz kafka.tgz -C opt/kafka --strip-components 1; \
-        gpg --import KEYS; \
-        gpg --batch --verify kafka.tgz.asc kafka.tgz; \
-    else \
-        tar xfz kafka.tgz -C opt/kafka --strip-components 1; \
-    fi;
-
-# Generate jsa files using dynamic CDS for kafka server start command and kafka storage format command
-RUN /etc/kafka/docker/jsa_launch
+#FROM eclipse-temurin:21-jre-alpine AS build-jsa
+#
+#USER root
+#
+## Get kafka from https://archive.apache.org/dist/kafka and pass the url through build arguments
+#ARG kafka_url
+#
+#COPY jsa_launch /etc/kafka/docker/jsa_launch
+#COPY server.properties /etc/kafka/docker/server.properties
+#
+#COPY *kafka.tgz kafka.tgz
+#
+#RUN set -eux ; \
+#    apk update ; \
+#    apk upgrade ; \
+#    apk add --no-cache bash; \
+#    mkdir opt/kafka; \
+#    if [ -n "$kafka_url" ]; then \
+#        apk add --no-cache wget gcompat gpg gpg-agent procps; \
+#        wget -nv -O kafka.tgz "$kafka_url"; \
+#        wget -nv -O kafka.tgz.asc "$kafka_url.asc"; \
+#        wget -nv -O KEYS https://downloads.apache.org/kafka/KEYS; \
+#        tar xfz kafka.tgz -C opt/kafka --strip-components 1; \
+#        gpg --import KEYS; \
+#        gpg --batch --verify kafka.tgz.asc kafka.tgz; \
+#    else \
+#        tar xfz kafka.tgz -C opt/kafka --strip-components 1; \
+#    fi;
+#
+## Generate jsa files using dynamic CDS for kafka server start command and kafka storage format command
+#RUN /etc/kafka/docker/jsa_launch
 
 
 FROM eclipse-temurin:21-jre-alpine
@@ -98,8 +98,8 @@ RUN mkdir opt/kafka; \
     apk cache clean;
 
 COPY server.properties /etc/kafka/docker/server.properties
-COPY --from=build-jsa kafka.jsa /opt/kafka/kafka.jsa
-COPY --from=build-jsa storage.jsa /opt/kafka/storage.jsa
+#COPY --from=build-jsa kafka.jsa /opt/kafka/kafka.jsa
+#COPY --from=build-jsa storage.jsa /opt/kafka/storage.jsa
 COPY --chown=appuser:appuser resources/common-scripts /etc/kafka/docker
 COPY --chown=appuser:appuser launch /etc/kafka/docker/launch
 

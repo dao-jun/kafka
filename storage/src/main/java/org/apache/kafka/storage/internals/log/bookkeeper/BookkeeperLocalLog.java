@@ -162,6 +162,10 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         return this.initializeFuture;
     }
 
+    public CompletableFuture<Long> initializeFuture() {
+        return this.initializeFuture;
+    }
+
     public CompletableFuture<Void> closeAsync() {
         CompletableFuture<Void> closeFuture = new CompletableFuture<>();
         this.managedLedger.asyncClose(new AsyncCallbacks.CloseCallback() {
@@ -364,7 +368,7 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                                                       LogOffsetMetadata maxOffsetMetadata, boolean includeAbortedTxns) {
         CompletableFuture<FetchDataInfo> future = new CompletableFuture<>();
         Position lac = managedLedger.getLastConfirmedEntry();
-        if (lac == null) {
+        if (lac == null || txnMaxPosition.equals(PositionFactory.EARLIEST)) {
             return CompletableFuture.completedFuture(
                     new FetchDataInfo(new LogOffsetMetadata(startOffset), MemoryRecords.EMPTY));
         }
@@ -372,6 +376,16 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         MutableObject<Position> mutablePosition = new MutableObject<>();
         index.findOffsetPositionAsync(startOffset, false)
                 .thenCompose(position -> {
+                    if (position.equals(PositionFactory.EARLIEST)) {
+                        Position firstPosition = managedLedger.getFirstPosition();
+                        if (firstPosition == null || !managedLedger.isValidPosition(firstPosition)) {
+                            return CompletableFuture.completedFuture(Collections.emptyList());
+                        }
+                        position = firstPosition;
+                    }
+                    if (position.equals(PositionFactory.LATEST)) {
+                        return CompletableFuture.completedFuture(Collections.emptyList());
+                    }
                     if (position.compareTo(lac) > 0 || maxLength <= 0) {
                         return CompletableFuture.completedFuture(Collections.emptyList());
                     }

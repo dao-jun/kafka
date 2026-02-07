@@ -554,7 +554,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                 case ACTIVE:
                     state = CoordinatorState.ACTIVE;
                     highWatermarklistener = new HighWatermarkListener();
-                    partitionWriter.registerListener(tp, highWatermarklistener);
+                    // partitionWriter.registerListener(tp, highWatermarklistener);
                     coordinator.onLoaded(metadataImage);
                     break;
 
@@ -620,7 +620,7 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
          */
         private void unload() {
             if (highWatermarklistener != null) {
-                partitionWriter.deregisterListener(tp, highWatermarklistener);
+                // partitionWriter.deregisterListener(tp, highWatermarklistener);
                 highWatermarklistener = null;
             }
             timer.cancelAll();
@@ -745,6 +745,9 @@ public class CoordinatorRuntime<S extends CoordinatorShard<U>, U> implements Aut
                         handleOffsetMismatch(offset, expectedOffset, events);
                         error.set(Errors.NOT_COORDINATOR.exception());
                     } else {
+                        if (highWatermarklistener != null) {
+                            highWatermarklistener.onHighWatermarkUpdated(tp, offset);
+                        }
                         deferredEventQueue.add(offset, events);
                     }
                 }

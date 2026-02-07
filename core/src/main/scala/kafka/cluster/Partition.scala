@@ -332,6 +332,7 @@ class Partition(val topicPartition: TopicPartition,
   def createLogIfNotExists(isNew: Boolean, isFutureReplica: Boolean, offsetCheckpoints: OffsetCheckpoints, topicId: Option[Uuid],
                            targetLogDirectoryId: Option[Uuid] = None): CompletableFuture[Unit] = {
     if (asyncLogModeEnable) {
+      info(s"Async log mode is enabled, creating BookkeeperUnifiedLog. tp: $topicPartition ")
       return createLogAsync(isNew, isFutureReplica, offsetCheckpoints, topicId, targetLogDirectoryId)
         .thenAccept(log => {
           this.log = Some(log)

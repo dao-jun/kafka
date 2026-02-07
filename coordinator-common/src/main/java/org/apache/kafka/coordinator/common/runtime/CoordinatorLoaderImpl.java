@@ -155,6 +155,18 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
                 lastCommittedOffset = replayResult.lastCommittedOffset;
             }
 
+            // After loading all records, ensure that lastWrittenOffset is set to the final offset.
+            // This is necessary because updateLastWrittenOffset is only called when currentOffset >=
+            // currentHighWatermark during the loop. If the loop ends without satisfying this condition,
+            // we need to update it here to ensure the coordinator state is consistent.
+            coordinator.updateLastWrittenOffset(currentOffset);
+
+            // Also update lastCommittedOffset if needed
+            long finalHighWatermark = log.highWatermark();
+            if (finalHighWatermark > lastCommittedOffset) {
+                coordinator.updateLastCommittedOffset(finalHighWatermark);
+            }
+
             long endTimeMs = time.milliseconds();
 
             if (logEndOffset(tp) == -1L) {

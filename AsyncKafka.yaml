@@ -1,0 +1,461 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulsar
+---
+# Oxia StatefulSet, Standalone
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: oxia
+  namespace: pulsar
+spec:
+  serviceName: oxia
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pulsar
+      component: oxia
+  template:
+    metadata:
+      labels:
+        app: pulsar
+        component: oxia
+    spec:
+      containers:
+        - name: oxia-standalone
+          image: oxia/oxia:0.15
+          imagePullPolicy: IfNotPresent
+          command: [ "oxia", "standalone" ]
+          args:
+            - "--wal-dir=/data/oxia"
+            - "--data-dir=/data/oxia"
+          ports:
+            - containerPort: 6648
+              name: oxia
+          volumeMounts:
+            - name: oxia-data
+              mountPath: /data/oxia
+  # 移除 hostPath，只用 PVC
+  volumeClaimTemplates:
+    - metadata:
+        name: oxia-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 2Gi
+---
+# 还需要一个 Service 来暴露端口
+apiVersion: v1
+kind: Service
+metadata:
+  name: oxia
+  namespace: pulsar
+spec:
+  selector:
+    app: pulsar
+    component: oxia
+  ports:
+    - port: 6648
+      targetPort: oxia
+---
+# 初始化脚本 ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulsar-init-script
+  namespace: pulsar
+data:
+  pulsar-init.sh: |
+    #!/bin/bash
+    echo "Initializing Pulsar cluster metadata..."
+    bin/pulsar initialize-cluster-metadata \
+      --cluster my-cluster \
+      --metadata-store oxia://oxia:6648 \
+      --configuration-store oxia://oxia:6648 \
+      --web-service-url http://pulsar-broker:8080/ \
+      --broker-service-url pulsar://pulsar-broker:6650/
+    
+    echo "Pulsar cluster initialization completed."
+---
+# 集群初始化作业
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pulsar-init
+  namespace: pulsar
+  labels:
+    app: pulsar
+    component: init
+spec:
+  template:
+    spec:
+      containers:
+        - name: init
+          imagePullPolicy: IfNotPresent
+          image: apachepulsar/pulsar:4.1.1
+          # 修改为直接执行bash，并传入脚本路径
+          command: [ "bash", "/scripts/pulsar-init.sh" ]
+          env:
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: PULSAR_MEM
+              value: "-Xms128m -Xmx128m -XX:MaxDirectMemorySize=128m"
+          volumeMounts:
+            - name: init-script
+              mountPath: /scripts  # 挂载到独立目录，避免与镜像内部路径冲突
+              readOnly: true
+      restartPolicy: Never
+      volumes:
+        - name: init-script
+          configMap:
+            name: pulsar-init-script
+            defaultMode: 0755  # 确保脚本有执行权限
+  backoffLimit: 1
+---
+# BookKeeper StatefulSet (2节点)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pulsar-bookkeeper
+  namespace: pulsar
+  labels:
+    app: pulsar
+    component: bookkeeper
+spec:
+  serviceName: pulsar-bookkeeper
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pulsar
+      component: bookkeeper
+  template:
+    metadata:
+      labels:
+        app: pulsar
+        component: bookkeeper
+    spec:
+      containers:
+        - name: bookie
+          imagePullPolicy: IfNotPresent
+          image: apachepulsar/pulsar:4.1.1
+          command: [ "bash", "-c" ]
+          args:
+            - "bin/apply-config-from-env.py conf/bookkeeper.conf && exec bin/pulsar bookie"
+          env:
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: metadataServiceUri
+              value: "metadata-store:oxia://oxia:6648"
+            - name: journalDirectories
+              value: "/pulsar/data/bookkeeper/journal"
+            - name: ledgerDirectories
+              value: "/pulsar/data/bookkeeper/ledger"
+            - name: useHostNameAsBookieID
+              value: "true"
+            - name: advertisedAddress
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: httpServerEnabled
+              value: "true"
+            - name: BOOKIE_MEM
+              value: "-Xms256m -Xmx256m -XX:MaxDirectMemorySize=128m"
+          ports:
+            - containerPort: 3181
+              name: bookie
+          volumeMounts:
+            - name: bookkeeper-data
+              mountPath: /pulsar/data/bookkeeper
+            - name: journal
+              mountPath: /pulsar/data/bookkeeper/journal
+            - name: ledger
+              mountPath: /pulsar/data/bookkeeper/ledger
+      volumes:
+        - name: bookkeeper-data
+          hostPath:
+            path: /tmp/pulsar/data/bookkeeper
+            type: DirectoryOrCreate
+  volumeClaimTemplates:
+    - metadata:
+        name: journal
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 5Gi
+    - metadata:
+        name: ledger
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# BookKeeper Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulsar-bookkeeper
+  namespace: pulsar
+  labels:
+    app: pulsar
+    component: bookkeeper
+spec:
+  clusterIP: None
+  selector:
+    app: pulsar
+    component: bookkeeper
+  ports:
+    - name: bookie
+      port: 3181
+      targetPort: 3181
+
+---
+# -------------------------------------------- Kafka --------------------------------------------
+# Controller Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-controller
+  namespace: pulsar
+  labels:
+    app: kafka
+    component: controller
+spec:
+  selector:
+    app: kafka
+    component: controller
+  ports:
+    - name: controller
+      port: 9093
+      targetPort: 9093
+  clusterIP: None  # Headless Service
+
+---
+# Controller StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-controller
+  namespace: pulsar
+  labels:
+    app: kafka
+    component: controller
+spec:
+  serviceName: kafka-controller
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+      component: controller
+  template:
+    metadata:
+      labels:
+        app: kafka
+        component: controller
+    spec:
+      containers:
+        - name: kafka-controller
+          image: apache/kafka:4.2.0-rc3
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_LOG4J_ROOT_LOGLEVEL
+              value: "DEBUG"
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "controller"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-controller-0.kafka-controller.pulsar.svc.cluster.local:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_LISTENERS
+              value: "CONTROLLER://:9093"
+            - name: CLUSTER_ID
+              value: "4L6g3nShT-eMCtK--X86sw"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR
+              value: "1"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+          ports:
+            - containerPort: 9093
+              name: controller
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          livenessProbe:
+            tcpSocket:
+              port: 9093
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9093
+            initialDelaySeconds: 15
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+# Broker Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-broker
+  namespace: pulsar
+  labels:
+    app: kafka
+    component: broker
+spec:
+  selector:
+    app: kafka
+    component: broker
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092
+      nodePort: 30092
+    - name: internal
+      port: 19092
+      targetPort: 19092
+  type: NodePort
+
+---
+# Broker StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka-broker
+  namespace: pulsar
+  labels:
+    app: kafka
+    component: broker
+spec:
+  serviceName: kafka-broker
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+      component: broker
+  template:
+    metadata:
+      labels:
+        app: kafka
+        component: broker
+    spec:
+      containers:
+        - name: kafka-broker
+          image: daojun/async-kafka:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_NODE_ID
+              value: "2"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-controller-0.kafka-controller.pulsar.svc.cluster.local:9093"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://:19092,PLAINTEXT_HOST://:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-broker-0.kafka-broker:19092,PLAINTEXT_HOST://localhost:9092"  # 使用短域名
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: CLUSTER_ID
+              value: "4L6g3nShT-eMCtK--X86sw"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR
+              value: "1"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+            - name: KAFKA_LOG_ASYNC_MODE_ENABLE
+              value: "true"
+            - name: KAFKA_BOOKKEEPER_METADATA_STORE_URL
+              value: "oxia://oxia:6648"  # 使用短域名
+            - name: KAFKA_BOOKKEEPER_CLIENT_METADATA_SERVICE_URL
+              value: "metadata-store:oxia://oxia:6648"  # 使用短域名
+          ports:
+            - containerPort: 9092
+              name: plaintext
+            - containerPort: 19092
+              name: internal
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1"
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 30
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi

@@ -24,7 +24,6 @@ import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.coordinator.transaction.{TransactionLogConfig, TransactionStateManagerConfig}
 import org.apache.kafka.metadata.{ConfigRepository, MetadataCache}
-import org.apache.kafka.server.config.ServerConfigs
 import org.apache.kafka.server.util.Scheduler
 import org.apache.kafka.storage.internals.log.bookkeeper.{BookkeeperLocalLog, BookkeeperStorage, BookkeeperUnifiedLog}
 import org.apache.kafka.storage.internals.log.{AsyncProducerStateManager, AsyncTransactionIndex, CleanerConfig, LogCleaner, LogConfig, LogDirFailureChannel, LogOffsetsListener, ProducerStateManagerConfig, UnifiedLog}
@@ -39,7 +38,8 @@ import java.util.concurrent.{CompletableFuture, ConcurrentMap, CountDownLatch}
 import scala.jdk.CollectionConverters._
 import scala.collection._
 
-class AsyncLogManager(logDirs: Seq[File],
+class AsyncLogManager(brokerId: Int,
+                      logDirs: Seq[File],
                       initialOfflineDirs: Seq[File],
                       configRepository: ConfigRepository,
                       override val initialDefaultConfig: LogConfig,
@@ -91,8 +91,6 @@ class AsyncLogManager(logDirs: Seq[File],
   override def asyncLogModeEnabled: Boolean = true
 
   private val asyncLogs = new util.concurrent.ConcurrentHashMap[TopicPartition, CompletableFuture[BookkeeperUnifiedLog]]()
-
-  private val brokerId = initialDefaultConfig.getInt(ServerConfigs.BROKER_ID_CONFIG)
 
   private val metadataCacheOpt: Option[MetadataCache] = configRepository match {
     case metadataCache: MetadataCache =>
@@ -171,9 +169,9 @@ class AsyncLogManager(logDirs: Seq[File],
     val localLog = new BookkeeperLocalLog(initialDefaultConfig, scheduler, topicPartition, transactionIndex)
 
     localLog.initializeAsync(bookkeeperStorage.getManagedLedgerFactory)
-      .thenApply(_ => {
+      .thenApply(startOffset => {
         try {
-          new BookkeeperUnifiedLog(
+          val bookkeeperUnifiedLog = new BookkeeperUnifiedLog(
             localLog.logStartOffset(),
             localLog,
             brokerTopicStats,
@@ -184,6 +182,8 @@ class AsyncLogManager(logDirs: Seq[File],
             false,
             LogOffsetsListener.NO_OP_OFFSETS_LISTENER
           )
+          info(s"Initialized BookkeeperUnifiedLog for $topicPartition , logStartOffset: $startOffset, logEndOffset: ${localLog.logEndOffset()}")
+          bookkeeperUnifiedLog
         } catch {
           case t: Throwable =>
             error(s"Failed to initialize log for $topicPartition", t)
@@ -217,6 +217,12 @@ class AsyncLogManager(logDirs: Seq[File],
       })
     })
     asyncLogs.clear()
+  }
+
+  override def directoryIdsSet: Predef.Set[Uuid] = {
+    val set = mutable.Set[Uuid]()
+    set.add(new Uuid(brokerId, brokerId))
+    immutable.Set.from(set)
   }
 
   override def truncateTo(partitionOffsets: Map[TopicPartition, Long], isFuture: Boolean): Unit = {
@@ -411,7 +417,8 @@ object AsyncLogManager {
     val cleanerConfig = new CleanerConfig(config)
     val transactionLogConfig = new TransactionLogConfig(config)
 
-    new AsyncLogManager(logDirs = config.logDirs.asScala.map(new File(_).getAbsoluteFile),
+    new AsyncLogManager(config.brokerId(),
+      logDirs = config.logDirs.asScala.map(new File(_).getAbsoluteFile),
       initialOfflineDirs = initialOfflineDirs.map(new File(_).getAbsoluteFile),
       configRepository = configRepository,
       initialDefaultConfig = defaultLogConfig,

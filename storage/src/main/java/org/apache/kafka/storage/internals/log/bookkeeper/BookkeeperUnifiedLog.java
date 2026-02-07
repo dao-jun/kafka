@@ -426,7 +426,8 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
             case LOG_END, HIGH_WATERMARK -> bookkeeperLocalLog.logEndOffsetMetadata();
             case TXN_COMMITTED -> firstUnstableOffsetMetadata.orElse(bookkeeperLocalLog.logEndOffsetMetadata());
         };
-        return bookkeeperLocalLog.readAsync(startOffset, maxLength, minOneMessage, maxOffsetMetadata, isolation == FetchIsolation.TXN_COMMITTED);
+        return bookkeeperLocalLog.initializeFuture()
+                .thenCompose(__ -> bookkeeperLocalLog.readAsync(startOffset, maxLength, minOneMessage, maxOffsetMetadata, minOneMessage));
     }
 
     @Override
@@ -495,7 +496,12 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
 
     @Override
     public CompletableFuture<Void> takeProducerSnapshotAsync() {
-        return super.takeProducerSnapshotAsync();
+        return CompletableFuture.allOf(transactionIndex.takeSnapshotAsync(), ((AsyncProducerStateManager) producerStateManager).takeSnapshotAsync())
+                .whenComplete((ignored, e) -> {
+                    if (e != null) {
+                        log.error("Error closing BookkeeperLocalLog", e);
+                    }
+                });
     }
 
     @Override
