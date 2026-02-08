@@ -245,7 +245,7 @@ public class LogConfig extends AbstractConfig {
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SESSION_TIMEOUT_MILLIS, INT, 30_000, atLeast(0), HIGH, "")
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TIMEOUT_SECONDS, INT, 30_000, atLeast(0), HIGH, "")
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_SPECULATIVE_READ_TIMEOUT_MILLIS, INT, 0, atLeast(0), HIGH, "")
-                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE, INT, 16, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE, INT, 4, atLeast(1), HIGH, "")
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_USE_V2_WIRE_PROTOCOL, BOOLEAN, true, HIGH, "")
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_STICKY_READS, BOOLEAN, true, HIGH, "")
                 .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NETTY_MAX_FRAME_SIZE_BYTES, INT, 5 * 1024 * 1024, atLeast(0), HIGH, "")

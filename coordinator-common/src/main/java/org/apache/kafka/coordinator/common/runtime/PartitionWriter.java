@@ -90,12 +90,28 @@ public interface PartitionWriter {
         short transactionVersion
     ) throws KafkaException;
 
-    default CompletableFuture<Long> appendAsync(TopicPartition tp, VerificationGuard verificationGuard,
-                                        MemoryRecords records, short transactionVersion) {
+    /**
+     * Write records to the partitions asynchronously.
+     * This is the async version of {@link #append(TopicPartition, VerificationGuard, MemoryRecords, short)}.
+     * The default implementation wraps the synchronous append() in a CompletableFuture.
+     *
+     * @param tp                The partition to write records to.
+     * @param verificationGuard The verification guard.
+     * @param records           The MemoryRecords.
+     * @param transactionVersion  The transaction version (1 = TV1, 2 = TV2 etc.).
+     *                            Use TV_UNKNOWN (-1) for non-transaction writes.
+     * @return A CompletableFuture that completes with the log end offset right after the written records.
+     */
+    default CompletableFuture<Long> appendAsync(
+            TopicPartition tp,
+            VerificationGuard verificationGuard,
+            MemoryRecords records,
+            short transactionVersion
+    ) {
         try {
             return CompletableFuture.completedFuture(append(tp, verificationGuard, records, transactionVersion));
-        } catch (KafkaException e) {
-            return CompletableFuture.failedFuture(e);
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
         }
     }
 

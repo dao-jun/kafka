@@ -83,6 +83,7 @@ import org.apache.kafka.common.utils.BufferSupplier;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.coordinator.common.runtime.AsyncCoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorMetadataImage;
@@ -91,6 +92,7 @@ import org.apache.kafka.coordinator.common.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilderSupplier;
+import org.apache.kafka.coordinator.common.runtime.ICoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataDelta;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataImage;
 import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
@@ -172,6 +174,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
         private Persister persister;
         private Optional<Plugin<Authorizer>> authorizerPlugin;
         private PartitionMetadataClient partitionMetadataClient;
+        private boolean asyncCoordinator = false;
 
         public Builder(
             int nodeId,
@@ -231,6 +234,11 @@ public class GroupCoordinatorService implements GroupCoordinator {
             return this;
         }
 
+        public Builder withAsyncCoordinator(boolean enable) {
+            this.asyncCoordinator = enable;
+            return this;
+        }
+
         public GroupCoordinatorService build() {
             requireNonNull(config, "Config must be set.");
             requireNonNull(writer, "Writer must be set.");
@@ -259,25 +267,47 @@ public class GroupCoordinatorService implements GroupCoordinator {
                 coordinatorRuntimeMetrics
             );
 
-            CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime =
-                new CoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
-                    .withTime(time)
-                    .withTimer(timer)
-                    .withLogPrefix(logPrefix)
-                    .withLogContext(logContext)
-                    .withEventProcessor(processor)
-                    .withPartitionWriter(writer)
-                    .withLoader(loader)
-                    .withCoordinatorShardBuilderSupplier(supplier)
-                    .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
-                    .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
-                    .withCoordinatorMetrics(groupCoordinatorMetrics)
-                    .withSerializer(new GroupCoordinatorRecordSerde())
-                    .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
-                    .withAppendLingerMs(config.appendLingerMs())
-                    .withExecutorService(Executors.newSingleThreadExecutor())
-                    .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
-                    .build();
+            ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
+            if (asyncCoordinator) {
+                runtime = new AsyncCoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
+                        .withTime(time)
+                        .withTimer(timer)
+                        .withLogPrefix(logPrefix)
+                        .withLogContext(logContext)
+                        .withEventProcessor(processor)
+                        .withPartitionWriter(writer)
+                        .withLoader(loader)
+                        .withCoordinatorShardBuilderSupplier(supplier)
+                        .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
+                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
+                        .withCoordinatorMetrics(groupCoordinatorMetrics)
+                        .withSerializer(new GroupCoordinatorRecordSerde())
+                        .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
+                        .withAppendLingerMs(config.appendLingerMs())
+                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
+                        .build();
+
+            } else {
+                runtime = new CoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
+                        .withTime(time)
+                        .withTimer(timer)
+                        .withLogPrefix(logPrefix)
+                        .withLogContext(logContext)
+                        .withEventProcessor(processor)
+                        .withPartitionWriter(writer)
+                        .withLoader(loader)
+                        .withCoordinatorShardBuilderSupplier(supplier)
+                        .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
+                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
+                        .withCoordinatorMetrics(groupCoordinatorMetrics)
+                        .withSerializer(new GroupCoordinatorRecordSerde())
+                        .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
+                        .withAppendLingerMs(config.appendLingerMs())
+                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
+                        .build();
+            }
 
             return new GroupCoordinatorService(
                 logContext,
@@ -305,7 +335,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
     /**
      * The coordinator runtime.
      */
-    private final CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
+    private final ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
 
     /**
      * The metrics registry.
@@ -367,7 +397,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
     GroupCoordinatorService(
         LogContext logContext,
         GroupCoordinatorConfig config,
-        CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime,
+        ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime,
         GroupCoordinatorMetrics groupCoordinatorMetrics,
         GroupConfigManager groupConfigManager,
         Persister persister,
@@ -738,7 +768,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
 
             });
     }
-    
+
     private AlterShareGroupOffsetsResponseData buildErrorResponse(AlterShareGroupOffsetsResponseData response, InitializeShareGroupStateResult result) {
         AlterShareGroupOffsetsResponseData data = new AlterShareGroupOffsetsResponseData();
         Map<Uuid, Map<Integer, PartitionErrorData>> topicPartitionErrorsMap = result.getErrors();
@@ -1231,7 +1261,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
 
         return FutureUtils.combineFutures(futures, ArrayList::new, List::addAll);
     }
-    
+
     /**
      * See {@link GroupCoordinator#shareGroupDescribe(AuthorizableRequestContext, List)}.
      */
@@ -1296,7 +1326,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
         if (!isActive.get() || metadataImage == null) {
             return CompletableFuture.completedFuture(AlterShareGroupOffsetsRequest.getErrorResponseData(Errors.COORDINATOR_NOT_AVAILABLE));
         }
-        
+
         if (groupId == null || groupId.isEmpty()) {
             return CompletableFuture.completedFuture(AlterShareGroupOffsetsRequest.getErrorResponseData(Errors.INVALID_GROUP_ID));
         }
