@@ -29,22 +29,24 @@ import org.apache.kafka.common.message.{DeleteRecordsResponseData, DescribeLogDi
 import org.apache.kafka.common.{IsolationLevel, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.protocol.Errors
-import org.apache.kafka.common.record.{MemoryRecords, RecordValidationStats}
+import org.apache.kafka.common.record.internal.MemoryRecords
 import org.apache.kafka.common.requests.{FetchRequest, ListOffsetsRequest, ListOffsetsResponse, ProduceResponse}
 import org.apache.kafka.common.requests.FetchRequest.PartitionData
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.metadata.MetadataCache
-import org.apache.kafka.server.ActionQueue
+import org.apache.kafka.server.LogAppendResult.LogAppendSummary.fromAppendInfo
+import org.apache.kafka.server.{ActionQueue, LogAppendResult}
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal}
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
 import org.apache.kafka.server.purgatory.{DelayedDeleteRecords, DelayedOperationPurgatory, DelayedRemoteFetch, DelayedRemoteListOffsets, ListOffsetsPartitionStatus, TopicPartitionOperationKey}
 import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.server.util.Scheduler
-import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, LogAppendInfo, LogDirFailureChannel, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, UnifiedLog, VerificationGuard}
+import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, LogAppendInfo, LogDirFailureChannel, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, RecordValidationStats, UnifiedLog, VerificationGuard}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.{Optional, OptionalInt, OptionalLong}
 import java.util.concurrent.{CompletableFuture, CompletionException, ConcurrentLinkedDeque}
 import java.util.function.Consumer
@@ -113,10 +115,21 @@ class AsyncReplicaManager(override val config: KafkaConfig,
     val logReadResultsFutures = readFromLogAsync(params, fetchInfos, quota, readFromPurgatory = false)
     CompletableFuture.allOf(logReadResultsFutures.map(f => f._2).toArray: _*)
       .thenAccept(_ => {
-        val logReadResults = logReadResultsFutures.map { case (topicIdPartition, future) =>
-          topicIdPartition -> future.join()
+        val allEmpty = new AtomicBoolean(true)
+        val fetchPartitionData = logReadResultsFutures.map { case (topicIdPartition, future) =>
+          val result = future.join()
+          val partitionData = result.toFetchPartitionData(params.isFromFollower)
+          if (allEmpty.get() && partitionData.records.sizeInBytes() > 0) {
+            allEmpty.set(false)
+          }
+          topicIdPartition -> partitionData
         }
-        responseCallback(logReadResults.map { case (topicIdPartition, logReadResult) => topicIdPartition -> logReadResult.toFetchPartitionData(params.isFromFollower) })
+        if (!allEmpty.get()) {
+          responseCallback(fetchPartitionData)
+        } else if (params.maxWaitMs > 0) {
+          // TODO 如果全空，是否应该使用DELAY FETCH？
+          scheduler.scheduleOnce("-", () => responseCallback(fetchPartitionData), params.maxWaitMs)
+        }
       })
   }
 
@@ -175,7 +188,7 @@ class AsyncReplicaManager(override val config: KafkaConfig,
         val localProduceResults = localProduceResultFutures.map(kv => kv._1 -> kv._2.join())
         val produceStatus = buildProducePartitionStatus(localProduceResults)
         recordValidationStatsCallback(localProduceResults.map { case (k, v) =>
-          k -> v.info.recordValidationStats
+          k -> v.logAppendSummary().recordValidationStats
         })
         maybeAddDelayedProduce(requiredAcks, timeout, entriesPerPartition, localProduceResults, produceStatus, responseCallback)
       })
@@ -612,10 +625,9 @@ class AsyncReplicaManager(override val config: KafkaConfig,
 
       // reject appending to internal topics if it is not allowed
       if (Topic.isInternal(topicIdPartition.topic) && !internalTopicsAllowed) {
-        (topicIdPartition, CompletableFuture.completedFuture(LogAppendResult(
-          LogAppendInfo.UNKNOWN_LOG_APPEND_INFO,
-          Some(new InvalidTopicException(s"Cannot append to internal topic ${topicIdPartition.topic}")),
-          hasCustomErrorMessage = false)))
+        (topicIdPartition, CompletableFuture.completedFuture(new LogAppendResult(
+          fromAppendInfo(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO),
+          Optional.of(new InvalidTopicException(s"Cannot append to internal topic ${topicIdPartition.topic}")), false)))
       } else {
         try {
           val partition = getPartitionOrException(topicIdPartition)
@@ -632,7 +644,7 @@ class AsyncReplicaManager(override val config: KafkaConfig,
               if (traceEnabled)
                 trace(s"${records.sizeInBytes} written to log $topicIdPartition beginning at offset " +
                   s"${info.firstOffset} and ending at offset ${info.lastOffset}")
-              LogAppendResult(info, exception = None, hasCustomErrorMessage = false)
+              new LogAppendResult(fromAppendInfo(info), Optional.empty(), false)
             })
             .exceptionally(t => {
               handleAppendError(topicIdPartition, t, processFailedRecord)
@@ -659,16 +671,16 @@ class AsyncReplicaManager(override val config: KafkaConfig,
               _: CorruptRecordException |
               _: KafkaStorageException |
               _: UnknownTopicIdException) =>
-        LogAppendResult(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO, Some(e), hasCustomErrorMessage = false)
+        new LogAppendResult(fromAppendInfo(LogAppendInfo.UNKNOWN_LOG_APPEND_INFO), Optional.empty(), false)
       case rve: RecordValidationException =>
         val logStartOffset = processFailedRecord(topicIdPartition, rve.invalidException)
         val recordErrors = rve.recordErrors
-        LogAppendResult(LogAppendInfo.unknownLogAppendInfoWithAdditionalInfo(logStartOffset, recordErrors),
-          Some(rve.invalidException), hasCustomErrorMessage = true)
+        new LogAppendResult(fromAppendInfo(LogAppendInfo.unknownLogAppendInfoWithAdditionalInfo(logStartOffset, recordErrors)),
+          Optional.empty(), true)
       case t: Throwable =>
         val logStartOffset = processFailedRecord(topicIdPartition, t)
-        LogAppendResult(LogAppendInfo.unknownLogAppendInfoWithLogStartOffset(logStartOffset),
-          Some(t), hasCustomErrorMessage = false)
+        new LogAppendResult(fromAppendInfo(LogAppendInfo.unknownLogAppendInfoWithLogStartOffset(logStartOffset)),
+          Optional.of(t), false)
     }
   }
 

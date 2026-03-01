@@ -22,15 +22,15 @@ import org.apache.kafka.common.errors.CoordinatorLoadInProgressException;
 import org.apache.kafka.common.errors.NotCoordinatorException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.AbstractRecords;
-import org.apache.kafka.common.record.CompressionType;
-import org.apache.kafka.common.record.ControlRecordType;
-import org.apache.kafka.common.record.EndTransactionMarker;
-import org.apache.kafka.common.record.MemoryRecords;
-import org.apache.kafka.common.record.MemoryRecordsBuilder;
-import org.apache.kafka.common.record.RecordBatch;
-import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.record.internal.AbstractRecords;
+import org.apache.kafka.common.record.internal.CompressionType;
+import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.EndTransactionMarker;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
+import org.apache.kafka.common.record.internal.RecordBatch;
+import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.requests.TransactionResult;
 import org.apache.kafka.common.utils.BufferSupplier;
 import org.apache.kafka.common.utils.LogContext;
@@ -754,12 +754,15 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                     final AsyncCoordinatorBatch<U> batchToFlush = inFlightBatch;
 
                     // Register async completion handler
-                    appendFuture.whenComplete((offset, throwable) -> {
+                    appendFuture.whenComplete((offset, ex) -> {
+                        if (ex != null) {
+                            log.error("Error happened while appending records.", ex);
+                        }
                         try {
                             enqueueLast(new AsyncCoordinatorInternalEvent(
                                     "AsyncFlushCompletion",
                                     tp,
-                                    () -> handleAsyncFlushCompletion(batchToFlush, offset, throwable)
+                                    () -> handleAsyncFlushCompletion(batchToFlush, offset, ex)
                             ));
                         } catch (RejectedExecutionException e) {
                             // Event queue closed (coordinator shutting down)
@@ -866,7 +869,9 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                         tp, state);
                 batch.deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
                 freeInFlightBatch();
-                asyncOperationInProgress = false;
+                // Don't clear asyncOperationInProgress here - the state transition (unload)
+                // should have already cleared it. Clearing it here can cause race conditions
+                // where new operations start before the coordinator is fully transitioned.
                 return;
             }
 
@@ -1100,6 +1105,14 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                 }
 
                 if (isAtomic) {
+                    // Verify that a batch is available for atomic writes.
+                    // This can fail if an async operation is in progress or if the coordinator
+                    // transitioned to a non-ACTIVE state during batch allocation.
+                    if (currentBatch == null) {
+                        throw new IllegalStateException("Cannot perform atomic write for coordinator " + tp +
+                                " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                    }
+
                     // Compute the size of the records.
                     int estimatedSizeUpperBound = AbstractRecords.estimateSizeInBytes(
                             currentBatch.builder.magic(),
@@ -1119,6 +1132,12 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                                 verificationGuard,
                                 currentTimeMs
                         );
+
+                        // Verify that batch allocation succeeded after flush.
+                        if (currentBatch == null) {
+                            throw new IllegalStateException("Cannot allocate new batch for atomic write for coordinator " + tp +
+                                    " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                        }
                     }
                 }
 
@@ -1128,6 +1147,14 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                     SimpleRecord recordToAppend = recordsToAppend.get(i);
 
                     if (!isAtomic) {
+                        // Verify that a batch is available for non-atomic writes.
+                        // This can fail if an async operation is in progress or if the coordinator
+                        // transitioned to a non-ACTIVE state during batch allocation.
+                        if (currentBatch == null) {
+                            throw new IllegalStateException("Cannot perform write for coordinator " + tp +
+                                    " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                        }
+
                         // Check if the current batch has enough space. We check this before
                         // replaying the record in order to avoid having to revert back
                         // changes if the record do not fit within a batch.
@@ -1148,6 +1175,12 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                                     verificationGuard,
                                     currentTimeMs
                             );
+
+                            // Verify that batch allocation succeeded after flush.
+                            if (currentBatch == null) {
+                                throw new IllegalStateException("Cannot allocate new batch for coordinator " + tp +
+                                        " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                            }
                         }
                     }
 
@@ -1242,6 +1275,9 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
 
                 // Register async completion handler
                 appendFuture.whenComplete((offset, ex) -> {
+                    if (ex != null) {
+                        log.error("Error happened when append CompleteTransaction records", ex);
+                    }
                     try {
                         enqueueLast(new AsyncCoordinatorInternalEvent(
                                 "TransactionMarkerCompletion",
@@ -1309,7 +1345,9 @@ public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implement
                         tp, state);
                 coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
                 event.complete(Errors.NOT_COORDINATOR.exception());
-                asyncOperationInProgress = false;
+                // Don't clear asyncOperationInProgress here - the state transition (unload)
+                // should have already cleared it. Clearing it here can cause race conditions
+                // where new operations start before the coordinator is fully transitioned.
                 return;
             }
 

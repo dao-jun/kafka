@@ -739,7 +739,7 @@ class BrokerServer(
       .withPersister(persister)
       .withAuthorizerPlugin(authorizerPlugin.toJava)
       .withPartitionMetadataClient(partitionMetadataClient)
-      .withAsyncCoordinator(asyncLogModeEnable)
+      .withAsyncCoordinator(false)
       .build()
   }
 
@@ -781,7 +781,7 @@ class BrokerServer(
       .withCoordinatorRuntimeMetrics(new ShareCoordinatorRuntimeMetrics(metrics))
       .withCoordinatorMetrics(new ShareCoordinatorMetrics(metrics))
       .withShareGroupEnabledConfigSupplier(() => config.shareGroupConfig.isShareGroupEnabled)
-      .withAsyncCoordinator(asyncLogModeEnable)
+      .withAsyncCoordinator(false)
       .build()
   }
 

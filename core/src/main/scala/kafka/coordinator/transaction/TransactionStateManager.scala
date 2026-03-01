@@ -593,7 +593,7 @@ class TransactionStateManager(brokerId: Int,
    * Returns a CompletableFuture that completes with the loaded transactions.
    */
   private def loadTransactionMetadata(topicPartition: TopicPartition,
-                                           coordinatorEpoch: Int): CompletableFuture[ConcurrentMap[String, TransactionMetadata]] = {
+                                      coordinatorEpoch: Int): CompletableFuture[ConcurrentMap[String, TransactionMetadata]] = {
     val loadedTransactions = new ConcurrentHashMap[String, TransactionMetadata]
 
     replicaManager.getLog(topicPartition) match {

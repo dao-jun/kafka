@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;

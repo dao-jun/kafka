@@ -19,7 +19,8 @@ package org.apache.kafka.coordinator.common.runtime;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.errors.NotLeaderOrFollowerException;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.FileRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.storage.internals.log.UnifiedLog;
@@ -135,7 +136,7 @@ public class AsyncCoordinatorLoaderImpl<T> extends CoordinatorLoaderImpl<T> {
                     // Update context.buffer when we allocated a new buffer (FileRecords case)
                     // memoryRecords.buffer() returns a duplicate, but it shares the same underlying array
                     // which is what we need for reuse in the next iteration
-                    if (records instanceof org.apache.kafka.common.record.FileRecords) {
+                    if (records instanceof FileRecords) {
                         context.buffer = memoryRecords.buffer();
                     }
 

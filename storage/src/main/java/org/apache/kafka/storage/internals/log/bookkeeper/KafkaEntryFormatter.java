@@ -17,7 +17,7 @@
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
 import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -35,7 +35,7 @@ import java.util.List;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 
-import static org.apache.kafka.common.record.Records.OFFSET_LENGTH;
+import static org.apache.kafka.common.record.internal.Records.OFFSET_LENGTH;
 
 public class KafkaEntryFormatter {
     private static final Logger log = LoggerFactory.getLogger(KafkaEntryFormatter.class);
