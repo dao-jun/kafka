@@ -84,6 +84,7 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.coordinator.common.runtime.AsyncCoordinatorRuntime;
+import org.apache.kafka.coordinator.common.runtime.CoordinatorBackgroundThreadPoolExecutor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorMetadataImage;
@@ -141,7 +142,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntSupplier;
 import java.util.stream.Collectors;
@@ -268,6 +269,13 @@ public class GroupCoordinatorService implements GroupCoordinator {
                 coordinatorRuntimeMetrics
             );
 
+            ExecutorService executorService = new CoordinatorBackgroundThreadPoolExecutor(
+                "group-coordinator-background-",
+                config.numBackgroundThreads(),
+                time,
+                coordinatorRuntimeMetrics
+            );
+
             ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
             if (asyncCoordinator) {
                 runtime = new AsyncCoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
@@ -285,7 +293,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
                         .withSerializer(new GroupCoordinatorRecordSerde())
                         .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
                         .withAppendLingerMs(config.appendLingerMs())
-                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withExecutorService(executorService)
                         .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
                         .build();
 
@@ -305,7 +313,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
                         .withSerializer(new GroupCoordinatorRecordSerde())
                         .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
                         .withAppendLingerMs(config.appendLingerMs())
-                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withExecutorService(executorService)
                         .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
                         .build();
             }
@@ -769,7 +777,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
 
             });
     }
-
+    
     private AlterShareGroupOffsetsResponseData buildErrorResponse(AlterShareGroupOffsetsResponseData response, InitializeShareGroupStateResult result) {
         AlterShareGroupOffsetsResponseData data = new AlterShareGroupOffsetsResponseData();
         Map<Uuid, Map<Integer, PartitionErrorData>> topicPartitionErrorsMap = result.getErrors();
@@ -1327,7 +1335,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
         if (!isActive.get() || metadataImage == null) {
             return CompletableFuture.completedFuture(AlterShareGroupOffsetsRequest.getErrorResponseData(Errors.COORDINATOR_NOT_AVAILABLE));
         }
-
+        
         if (groupId == null || groupId.isEmpty()) {
             return CompletableFuture.completedFuture(AlterShareGroupOffsetsRequest.getErrorResponseData(Errors.INVALID_GROUP_ID));
         }
