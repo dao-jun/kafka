@@ -77,4 +77,12 @@ public class MessageMetadataUtils {
     public static MessageMetadata parseMessageMetadata(ByteBuf buf) {
         return Commands.parseMessageMetadata(buf);
     }
+
+    public static void skipBrokerMessageMetadata(ByteBuf buf) {
+        Commands.skipBrokerEntryMetadataIfExist(buf);
+    }
+
+    public static void skipMessageMetadata(ByteBuf buf) {
+        Commands.skipMessageMetadata(buf);
+    }
 }

@@ -452,20 +452,15 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                         new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, bookkeeperLocalLog.logEndOffset(), Optional.empty())));
             }
             return bookkeeperLocalLog.readLatestRecordsAsync()
-                    .thenApply(result -> {
-                        try {
-                            MemoryRecords records = result.records();
-                            Optional<RecordBatch> lastBatchOpt = records.lastBatch();
-                            if (lastBatchOpt.isEmpty()) {
-                                return new OffsetResultHolder(
-                                        new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, -1L, Optional.empty()));
-                            } else {
-                                RecordBatch lastBatch = lastBatchOpt.get();
-                                return new OffsetResultHolder(
-                                        new FileRecords.TimestampAndOffset(lastBatch.maxTimestamp(), lastBatch.lastOffset(), Optional.empty()));
-                            }
-                        } finally {
-                            result.release();
+                    .thenApply(records -> {
+                        Optional<RecordBatch> lastBatchOpt = records.lastBatch();
+                        if (lastBatchOpt.isEmpty()) {
+                            return new OffsetResultHolder(
+                                    new FileRecords.TimestampAndOffset(RecordBatch.NO_TIMESTAMP, -1L, Optional.empty()));
+                        } else {
+                            RecordBatch lastBatch = lastBatchOpt.get();
+                            return new OffsetResultHolder(
+                                    new FileRecords.TimestampAndOffset(lastBatch.maxTimestamp(), lastBatch.lastOffset(), Optional.empty()));
                         }
                     });
         } else {
@@ -525,9 +520,9 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
             return closeFuture;
         }
         CompletableFuture.allOf(
-                transactionIndex.takeSnapshotAsync(),
-                ((AsyncProducerStateManager) producerStateManager).takeSnapshotAsync(),
-                bookkeeperLocalLog.closeAsync())
+                        transactionIndex.takeSnapshotAsync(),
+                        ((AsyncProducerStateManager) producerStateManager).takeSnapshotAsync(),
+                        bookkeeperLocalLog.closeAsync())
                 .whenComplete((ignored, e) -> {
                     if (e != null) {
                         log.error("Error closing BookkeeperLocalLog", e);

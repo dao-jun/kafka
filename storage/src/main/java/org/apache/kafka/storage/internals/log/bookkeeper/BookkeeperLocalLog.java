@@ -331,14 +331,9 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     future.complete(null);
                     return;
                 }
-                RecordsDecodeResult result = null;
                 try {
-                    result = KafkaEntryFormatter.decode(entries);
-                    consumer.accept(result.records());
+                    consumer.accept(KafkaEntryFormatter.decode(entries));
                 } catch (Throwable t) {
-                    if (result != null) {
-                        result.release();
-                    }
                     future.completeExceptionally(t);
                     return;
                 }
@@ -408,9 +403,7 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     if (entries.isEmpty()) {
                         fetchDataInfo = FetchDataInfo.empty(startOffset);
                     } else {
-                        // TODO release buffer after result sent to client.
-                        RecordsDecodeResult result = KafkaEntryFormatter.decode(entries);
-                        fetchDataInfo = new FetchDataInfo(new LogOffsetMetadata(startOffset), result.records());
+                        fetchDataInfo = new FetchDataInfo(new LogOffsetMetadata(startOffset), KafkaEntryFormatter.decode(entries));
                     }
 
                     // Resolve aborted transactions
@@ -492,12 +485,12 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
         }
     }
 
-    public CompletableFuture<RecordsDecodeResult> readLatestRecordsAsync() {
+    public CompletableFuture<MemoryRecords> readLatestRecordsAsync() {
         Position lac = managedLedger.getLastConfirmedEntry();
         if (lac == null) {
-            return CompletableFuture.completedFuture(RecordsDecodeResult.EMPTY);
+            return CompletableFuture.completedFuture(MemoryRecords.EMPTY);
         }
-        CompletableFuture<RecordsDecodeResult> future = new CompletableFuture<>();
+        CompletableFuture<MemoryRecords> future = new CompletableFuture<>();
         managedLedger.asyncReadEntry(lac, new AsyncCallbacks.ReadEntryCallback() {
             @Override
             public void readEntryComplete(Entry entry, Object ctx) {

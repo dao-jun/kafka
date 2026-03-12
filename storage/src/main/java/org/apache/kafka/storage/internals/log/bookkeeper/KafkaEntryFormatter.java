@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.storage.internals.log.bookkeeper;
 
-import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.storage.internals.log.LogAppendInfo;
 
@@ -35,8 +34,6 @@ import java.util.List;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 
-import static org.apache.kafka.common.record.internal.Records.OFFSET_LENGTH;
-
 public class KafkaEntryFormatter {
     private static final Logger log = LoggerFactory.getLogger(KafkaEntryFormatter.class);
 
@@ -48,37 +45,21 @@ public class KafkaEntryFormatter {
         return serializeMetadataAndPayload(CHECKSUM_TYPE, metadata, payload);
     }
 
-    public static RecordsDecodeResult decode(List<Entry> entries) {
-        int totalSize = 0;
-        int numberOfMessages = 0;
-        // batched ByteBuf should be released after sending to client
-        ByteBuf batchedByteBuf = PulsarByteBufAllocator.DEFAULT.directBuffer(totalSize);
+    public static MemoryRecords decode(List<Entry> entries) {
+        int totalBytes = 0;
         for (Entry entry : entries) {
-            try {
-                final ByteBuf byteBuf = entry.getDataBuffer();
-                long startOffset = MessageMetadataUtils.peekBaseOffsetFromEntry(entry);
-                final MessageMetadata metadata = MessageMetadataUtils.parseMessageMetadata(byteBuf);
-                numberOfMessages += metadata.hasNumMessagesInBatch() ? metadata.getNumMessagesInBatch() : 1;
-
-                // not need down converted, batch magic retains the magic value written in production
-                // Skip the first OFFSET_LENGTH bytes, which is the offset of the entry
-                ByteBuf buf = byteBuf.slice(byteBuf.readerIndex(), byteBuf.readableBytes());
-                totalSize += buf.readableBytes();
-                // Write the start offset at the beginning of the entry, SEE: OFFSET_OFFSET
-                batchedByteBuf.writeLong(startOffset);
-                batchedByteBuf.writeBytes(buf.skipBytes(OFFSET_LENGTH));
-                // Almost all exceptions in Kafka inherit from KafkaException and will be captured
-                // and processed in KafkaApis. Here, whether it is down-conversion or the IOException
-                // in builder.appendWithOffset in decodePulsarEntryToKafkaRecords will be caught by Kafka
-                // and the KafkaException will be thrown. So we need to catch KafkaException here.
-            } catch (KafkaException e) { // skip failed decode entry
-                log.error("[{}:{}] Failed to decode entry. ", entry.getLedgerId(), entry.getEntryId(), e);
-            } finally {
-                entry.release();
-            }
+            ByteBuf buf = entry.getDataBuffer();
+            MessageMetadataUtils.skipBrokerMessageMetadata(buf);
+            MessageMetadataUtils.skipMessageMetadata(buf);
+            totalBytes += buf.readableBytes();
         }
-
-        return new RecordsDecodeResult(batchedByteBuf, numberOfMessages, MemoryRecords.readableRecords(batchedByteBuf.nioBuffer()));
+        ByteBuffer buffer = ByteBuffer.allocate(totalBytes);
+        for (Entry entry : entries) {
+            entry.getDataBuffer().readBytes(buffer);
+            buffer.flip();
+            entry.release();
+        }
+        return MemoryRecords.readableRecords(buffer);
     }
 
     private static MessageMetadata metadata(LogAppendInfo appendInfo) {

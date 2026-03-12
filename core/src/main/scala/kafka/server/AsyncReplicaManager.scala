@@ -30,15 +30,16 @@ import org.apache.kafka.common.{IsolationLevel, TopicIdPartition, TopicPartition
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.record.internal.MemoryRecords
-import org.apache.kafka.common.requests.{FetchRequest, ListOffsetsRequest, ListOffsetsResponse, ProduceResponse}
+import org.apache.kafka.common.requests.{FetchRequest, ListOffsetsRequest, ListOffsetsResponse}
 import org.apache.kafka.common.requests.FetchRequest.PartitionData
+import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.utils.Time
 import org.apache.kafka.metadata.MetadataCache
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary.fromAppendInfo
 import org.apache.kafka.server.{ActionQueue, LogAppendResult}
-import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal}
+import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, TransactionVersion}
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
-import org.apache.kafka.server.purgatory.{DelayedDeleteRecords, DelayedOperationPurgatory, DelayedRemoteFetch, DelayedRemoteListOffsets, ListOffsetsPartitionStatus, TopicPartitionOperationKey}
+import org.apache.kafka.server.purgatory.{DelayedDeleteRecords, DelayedOperationPurgatory, DelayedProduce, DelayedRemoteFetch, DelayedRemoteListOffsets, ListOffsetsPartitionStatus, TopicPartitionOperationKey}
 import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.server.util.Scheduler
@@ -50,7 +51,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.{Optional, OptionalInt, OptionalLong}
 import java.util.concurrent.{CompletableFuture, CompletionException, ConcurrentLinkedDeque}
 import java.util.function.Consumer
-import scala.collection.mutable
+import scala.collection.{Map, mutable}
 import scala.jdk.CollectionConverters.{CollectionHasAsScala, MutableMapHasAsJava, SeqHasAsJava}
 import scala.jdk.OptionConverters.RichOptional
 
@@ -161,18 +162,16 @@ class AsyncReplicaManager(override val config: KafkaConfig,
     localProduceResultsWithTopicId
   }
 
-  override def appendRecords(
-    timeout: Long,
-    requiredAcks: Short,
-    internalTopicsAllowed: Boolean,
-    origin: AppendOrigin,
-    entriesPerPartition: collection.Map[TopicIdPartition, MemoryRecords],
-    responseCallback: collection.Map[TopicIdPartition, ProduceResponse.PartitionResponse] => Unit,
-    recordValidationStatsCallback: collection.Map[TopicIdPartition, RecordValidationStats] => Unit,
-    requestLocal: RequestLocal,
-    verificationGuards: collection.Map[TopicPartition, VerificationGuard],
-    transactionVersion: Short
-    ): Unit = {
+  override def appendRecords(timeout: Long,
+                             requiredAcks: Short,
+                             internalTopicsAllowed: Boolean,
+                             origin: AppendOrigin,
+                             entriesPerPartition: Map[TopicIdPartition, MemoryRecords],
+                             responseCallback: util.Map[TopicIdPartition, PartitionResponse] => Unit,
+                             recordValidationStatsCallback: Map[TopicIdPartition, RecordValidationStats] => Unit = _ => (),
+                             requestLocal: RequestLocal = RequestLocal.noCaching,
+                             verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty,
+                             transactionVersion: Short = TransactionVersion.TV_UNKNOWN): Unit = {
     val localProduceResultFutures = appendRecordsToLeaderAsync(
       requiredAcks,
       internalTopicsAllowed,
