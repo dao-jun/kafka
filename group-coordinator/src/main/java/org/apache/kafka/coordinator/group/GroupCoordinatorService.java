@@ -87,7 +87,6 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.common.utils.internals.BufferSupplier;
 import org.apache.kafka.common.utils.internals.LogContext;
-import org.apache.kafka.coordinator.common.runtime.AsyncCoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorBackgroundThreadPoolExecutor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
@@ -97,7 +96,6 @@ import org.apache.kafka.coordinator.common.runtime.CoordinatorResult;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilderSupplier;
-import org.apache.kafka.coordinator.common.runtime.ICoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataDelta;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataImage;
 import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
@@ -185,7 +183,6 @@ public class GroupCoordinatorService implements GroupCoordinator {
         private Persister persister;
         private Optional<Plugin<Authorizer>> authorizerPlugin;
         private PartitionMetadataClient partitionMetadataClient;
-        private boolean asyncCoordinator = false;
 
         public Builder(
             int nodeId,
@@ -245,11 +242,6 @@ public class GroupCoordinatorService implements GroupCoordinator {
             return this;
         }
 
-        public Builder withAsyncCoordinator(boolean enable) {
-            this.asyncCoordinator = enable;
-            return this;
-        }
-
         public GroupCoordinatorService build() {
             requireNonNull(config, "Config must be set.");
             requireNonNull(writer, "Writer must be set.");
@@ -288,47 +280,25 @@ public class GroupCoordinatorService implements GroupCoordinator {
                 coordinatorRuntimeMetrics
             );
 
-            ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
-            if (asyncCoordinator) {
-                runtime = new AsyncCoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
-                        .withTime(time)
-                        .withTimer(timer)
-                        .withLogPrefix(logPrefix)
-                        .withLogContext(logContext)
-                        .withEventProcessor(processor)
-                        .withPartitionWriter(writer)
-                        .withLoader(loader)
-                        .withCoordinatorShardBuilderSupplier(supplier)
-                        .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
-                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
-                        .withCoordinatorMetrics(groupCoordinatorMetrics)
-                        .withSerializer(new GroupCoordinatorRecordSerde())
-                        .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
-                        .withAppendLingerMs(config.appendLingerMs())
-                        .withExecutorService(executorService)
-                        .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
-                        .build();
-
-            } else {
-                runtime = new CoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
-                        .withTime(time)
-                        .withTimer(timer)
-                        .withLogPrefix(logPrefix)
-                        .withLogContext(logContext)
-                        .withEventProcessor(processor)
-                        .withPartitionWriter(writer)
-                        .withLoader(loader)
-                        .withCoordinatorShardBuilderSupplier(supplier)
-                        .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
-                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
-                        .withCoordinatorMetrics(groupCoordinatorMetrics)
-                        .withSerializer(new GroupCoordinatorRecordSerde())
-                        .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
-                        .withAppendLingerMs(config.appendLingerMs())
-                        .withExecutorService(executorService)
-                        .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
-                        .build();
-            }
+            CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime =
+                new CoordinatorRuntime.Builder<GroupCoordinatorShard, CoordinatorRecord>()
+                    .withTime(time)
+                    .withTimer(timer)
+                    .withLogPrefix(logPrefix)
+                    .withLogContext(logContext)
+                    .withEventProcessor(processor)
+                    .withPartitionWriter(writer)
+                    .withLoader(loader)
+                    .withCoordinatorShardBuilderSupplier(supplier)
+                    .withWriteTimeout(Duration.ofMillis(config.offsetCommitTimeoutMs()))
+                    .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
+                    .withCoordinatorMetrics(groupCoordinatorMetrics)
+                    .withSerializer(new GroupCoordinatorRecordSerde())
+                    .withCompression(Compression.of(config.offsetTopicCompressionType()).build())
+                    .withAppendLingerMs(config.appendLingerMs())
+                    .withExecutorService(executorService)
+                    .withCachedBufferMaxBytesSupplier(config::cachedBufferMaxBytes)
+                    .build();
 
             return new GroupCoordinatorService(
                 logContext,
@@ -358,7 +328,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
     /**
      * The coordinator runtime.
      */
-    private final ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
+    private final CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime;
 
     /**
      * The metrics registry.
@@ -434,7 +404,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
     GroupCoordinatorService(
         LogContext logContext,
         GroupCoordinatorConfig config,
-        ICoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime,
+        CoordinatorRuntime<GroupCoordinatorShard, CoordinatorRecord> runtime,
         GroupCoordinatorMetrics groupCoordinatorMetrics,
         GroupConfigManager groupConfigManager,
         Persister persister,
@@ -1757,7 +1727,7 @@ public class GroupCoordinatorService implements GroupCoordinator {
 
         return FutureUtils.combineFutures(futures, ArrayList::new, List::addAll);
     }
-
+    
     /**
      * See {@link GroupCoordinator#shareGroupDescribe(AuthorizableRequestContext, List)}.
      */
