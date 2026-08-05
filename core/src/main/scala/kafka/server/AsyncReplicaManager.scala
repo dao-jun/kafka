@@ -17,10 +17,9 @@
 package kafka.server
 
 import kafka.cluster.Partition
-import kafka.log.LogManager
-import kafka.server.QuotaFactory.QuotaManagers
 import kafka.server.ReplicaManager.isListOffsetsTimestampUnsupported
 import kafka.server.share.DelayedShareFetch
+import org.apache.kafka.server.quota.QuotaFactory.QuotaManagers
 import org.apache.kafka.common.errors.{CorruptRecordException, FencedLeaderEpochException, InconsistentTopicIdException, InvalidProducerEpochException, InvalidTopicException, KafkaStorageException, NotLeaderOrFollowerException, OffsetNotAvailableException, OffsetOutOfRangeException, RecordBatchTooLargeException, RecordTooLargeException, ReplicaNotAvailableException, UnknownLeaderEpochException, UnknownTopicIdException, UnknownTopicOrPartitionException, UnsupportedForMessageFormatException}
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.message.ListOffsetsRequestData.ListOffsetsPartition
@@ -38,12 +37,14 @@ import org.apache.kafka.metadata.MetadataCache
 import org.apache.kafka.server.LogAppendResult.LogAppendSummary.fromAppendInfo
 import org.apache.kafka.server.{ActionQueue, LogAppendResult}
 import org.apache.kafka.server.common.{DirectoryEventHandler, RequestLocal, TransactionVersion}
+import org.apache.kafka.server.partition.AlterPartitionManager
+import org.apache.kafka.server.quota.ReplicaQuota
 import org.apache.kafka.server.log.remote.storage.RemoteLogManager
 import org.apache.kafka.server.purgatory.{DelayedDeleteRecords, DelayedOperationPurgatory, DelayedProduce, DelayedRemoteFetch, DelayedRemoteListOffsets, ListOffsetsPartitionStatus, TopicPartitionOperationKey}
 import org.apache.kafka.server.storage.log.{FetchParams, FetchPartitionData}
 import org.apache.kafka.server.transaction.AddPartitionsToTxnManager
 import org.apache.kafka.server.util.Scheduler
-import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, LogAppendInfo, LogDirFailureChannel, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, RecordValidationStats, UnifiedLog, VerificationGuard}
+import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchDataInfo, LogAppendInfo, LogDirFailureChannel, LogManager, LogOffsetMetadata, LogReadInfo, LogReadResult, OffsetResultHolder, RecordValidationException, RecordValidationStats, UnifiedLog, VerificationGuard}
 import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util

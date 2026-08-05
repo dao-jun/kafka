@@ -18,13 +18,13 @@ package org.apache.kafka.storage.internals.log.bookkeeper;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.message.AbortedTxn;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.util.Scheduler;
-import org.apache.kafka.storage.internals.log.AbortedTxn;
 import org.apache.kafka.storage.internals.log.AsyncTransactionIndex;
 import org.apache.kafka.storage.internals.log.FetchDataInfo;
 import org.apache.kafka.storage.internals.log.LocalLog;
@@ -414,7 +414,11 @@ public class BookkeeperLocalLog extends LocalLog implements AsyncCallbacks.AddEn
                     TxnIndexSearchResult txnIndexSearchResult = transactionIndex.collectAbortedTxns(startOffset, lastBatch.get().lastOffset());
                     List<AbortedTxn> abortedTxns = txnIndexSearchResult.abortedTransactions();
                     if (!abortedTxns.isEmpty()) {
-                        List<FetchResponseData.AbortedTransaction> abortedTransactions = abortedTxns.stream().map(AbortedTxn::asAbortedTransaction).toList();
+                        List<FetchResponseData.AbortedTransaction> abortedTransactions = abortedTxns.stream()
+                            .map(abortedTxn -> new FetchResponseData.AbortedTransaction()
+                                .setProducerId(abortedTxn.producerId())
+                                .setFirstOffset(abortedTxn.firstOffset()))
+                            .toList();
                         return new FetchDataInfo(fetchDataInfo.fetchOffsetMetadata, fetchDataInfo.records,
                                 false, Optional.of(abortedTransactions));
                     }

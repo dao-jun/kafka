@@ -17,7 +17,9 @@
 package org.apache.kafka.storage.internals.log;
 
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.message.AbortedTxn;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.protocol.MessageUtil;
 
 import com.google.common.collect.ImmutableList;
 
@@ -174,7 +176,7 @@ public class AsyncTransactionIndex {
             buf.writeLong(lastOffset);
             buf.writeLong(mapEndOffset);
             for (AbortedTxn abortedTxn : abortedTxns) {
-                ByteBuffer buffer = abortedTxn.buffer;
+                ByteBuffer buffer = MessageUtil.toVersionPrefixedByteBuffer(AbortedTxn.HIGHEST_SUPPORTED_VERSION, abortedTxn);
                 buf.writeBytes(buffer);
             }
         }
@@ -213,14 +215,18 @@ public class AsyncTransactionIndex {
             List<AbortedTxn> abortedTxns = new ArrayList<>();
             while (buf.isReadable()) {
                 short version = buf.readShort();
-                if (version != AbortedTxn.CURRENT_VERSION) {
+                if (version < AbortedTxn.LOWEST_SUPPORTED_VERSION || version > AbortedTxn.HIGHEST_SUPPORTED_VERSION) {
                     throw new IllegalArgumentException("Unsupported version: " + version);
                 }
                 long producerId = buf.readLong();
                 long firstOffset = buf.readLong();
                 long lastOffset0 = buf.readLong();
                 long lastStableOffset = buf.readLong();
-                abortedTxns.add(new AbortedTxn(producerId, firstOffset, lastOffset0, lastStableOffset));
+                abortedTxns.add(new AbortedTxn()
+                    .setProducerId(producerId)
+                    .setFirstOffset(firstOffset)
+                    .setLastOffset(lastOffset0)
+                    .setLastStableOffset(lastStableOffset));
             }
             return new TransactionIndexSnapshot(new TopicPartition(topic, partition), lastOffset, mapEndOffset, abortedTxns);
         }

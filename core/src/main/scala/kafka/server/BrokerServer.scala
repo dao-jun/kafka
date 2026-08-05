@@ -19,7 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.CoordinatorPartitionWriter
 import kafka.coordinator.transaction.TransactionCoordinator
-import kafka.log.{AsyncLogManager, LogManager}
+import kafka.log.LogManager
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.metadata._
@@ -229,16 +229,16 @@ class BrokerServer(
       // until we catch up on the metadata log and have up-to-date topic and broker configs.
       logManager = if (!asyncLogModeEnable) {
         LogManager(config,
-          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          sharedServer.metaPropsEnsemble.errorLogDirs(),
           metadataCache,
           kafkaScheduler,
           time,
           brokerTopicStats,
           logDirFailureChannel)
       } else {
-        AsyncLogManager(
+        kafka.log.AsyncLogManager.apply(
           config,
-          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          new java.util.ArrayList[String](sharedServer.metaPropsEnsemble.errorLogDirs()),
           metadataCache,
           kafkaScheduler,
           time,
@@ -810,7 +810,7 @@ class BrokerServer(
       .withWriter(writer)
       .withCoordinatorRuntimeMetrics(new ShareCoordinatorRuntimeMetrics(metrics))
       .withCoordinatorMetrics(new ShareCoordinatorMetrics(metrics))
-      .withShareGroupEnabledConfigSupplier(() => config.shareGroupConfig.isShareGroupEnabled)
+      .withShareGroupEnabledConfigSupplier(() => true)
       .withAsyncCoordinator(false)
       .build()
   }

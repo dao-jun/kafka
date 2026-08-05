@@ -20,6 +20,7 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.InconsistentTopicIdException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
+import org.apache.kafka.common.message.AbortedTxn;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.FileRecords;
@@ -28,14 +29,13 @@ import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.RecordVersion;
 import org.apache.kafka.common.requests.ListOffsetsRequest;
-import org.apache.kafka.common.utils.PrimitiveRef;
+import org.apache.kafka.common.utils.internals.PrimitiveRef;
 import org.apache.kafka.server.common.RequestLocal;
 import org.apache.kafka.server.common.TransactionVersion;
 import org.apache.kafka.server.record.BrokerCompressionType;
 import org.apache.kafka.server.storage.log.FetchIsolation;
 import org.apache.kafka.server.storage.log.UnexpectedAppendOffsetException;
 import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
-import org.apache.kafka.storage.internals.log.AbortedTxn;
 import org.apache.kafka.storage.internals.log.AppendOrigin;
 import org.apache.kafka.storage.internals.log.AsyncOffsetReader;
 import org.apache.kafka.storage.internals.log.AsyncProducerStateManager;
@@ -200,7 +200,11 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                         CompletedTxn completedTxn = maybeCompletedTxn.get();
                         long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
                         if (completedTxn.isAborted() && txnMapEndOffset < mapEndOffset) {
-                            transactionIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                            transactionIndex.append(new AbortedTxn()
+                                .setProducerId(completedTxn.producerId())
+                                .setFirstOffset(completedTxn.firstOffset())
+                                .setLastOffset(completedTxn.lastOffset())
+                                .setLastStableOffset(lastStableOffset));
                         }
                         producerStateManager.completeTxn(completedTxn);
                     }
@@ -364,7 +368,11 @@ public class BookkeeperUnifiedLog extends UnifiedLog {
                             for (CompletedTxn completedTxn : result.completedTxns()) {
                                 long lastStableOffset = producerStateManager.lastStableOffset(completedTxn);
                                 if (completedTxn.isAborted()) {
-                                    transactionIndex.append(new AbortedTxn(completedTxn, lastStableOffset));
+                                    transactionIndex.append(new AbortedTxn()
+                                        .setProducerId(completedTxn.producerId())
+                                        .setFirstOffset(completedTxn.firstOffset())
+                                        .setLastOffset(completedTxn.lastOffset())
+                                        .setLastStableOffset(lastStableOffset));
                                 }
                                 producerStateManager.completeTxn(completedTxn);
                             }

@@ -80,6 +80,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 import static org.apache.kafka.coordinator.common.runtime.CoordinatorOperationExceptionHelper.handleOperationException;
 
@@ -156,6 +157,7 @@ public class ShareCoordinatorService implements ShareCoordinator {
         private ShareCoordinatorMetrics coordinatorMetrics;
         private CoordinatorRuntimeMetrics coordinatorRuntimeMetrics;
         private boolean asyncCoordinator = false;
+        private Supplier<Boolean> shareGroupConfigEnabledSupplier = () -> false;
 
         public Builder(int nodeId, ShareCoordinatorConfig config) {
             this.nodeId = nodeId;

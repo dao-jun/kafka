@@ -17,6 +17,7 @@
 package org.apache.kafka.storage.internals.log;
 
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.message.AbortedTxn;
 
 import com.google.common.collect.ImmutableList;
 
@@ -31,8 +32,8 @@ public class AsyncTransactionIndexTest {
         AsyncTransactionIndex.TransactionIndexSnapshot snapshot = new AsyncTransactionIndex.TransactionIndexSnapshot(
                 new TopicPartition("test", 0), 100, 1000,
                 ImmutableList.of(
-                        new AbortedTxn(1, 10, 20, 30),
-                        new AbortedTxn(2, 30, 40, 50)));
+                        new AbortedTxn().setProducerId(1).setFirstOffset(10).setLastOffset(20).setLastStableOffset(30),
+                        new AbortedTxn().setProducerId(2).setFirstOffset(30).setLastOffset(40).setLastStableOffset(50)));
 
         byte[] bytes = snapshot.toByteArray();
 

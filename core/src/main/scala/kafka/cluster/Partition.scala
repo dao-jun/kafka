@@ -390,15 +390,16 @@ class Partition(val topicPartition: TopicPartition,
                                        topicId: Option[Uuid], targetLogDirectoryId: Option[Uuid]): CompletableFuture[BookkeeperUnifiedLog] = {
     logManager.initializingLog(topicPartition)
     val future = new CompletableFuture[BookkeeperUnifiedLog]()
-    logManager.getOrCreateLogAsync(topicPartition, isNew, isFutureReplica, topicId.toJava, targetLogDirectoryId)
+    logManager.getOrCreateLogAsync(topicPartition, isNew, isFutureReplica, topicId.toJava, targetLogDirectoryId.toJava)
       .whenComplete((log, error) => {
         if (error != null) {
           future.completeExceptionally(error)
         } else {
-          log.setLogOffsetsListener(logOffsetsListener)
-          log.updateHighWatermark(log.logEndOffset())
-          logManager.finishedInitializingLog(topicPartition, Some(log))
-          future.complete(log)
+          val bkLog = log.asInstanceOf[BookkeeperUnifiedLog]
+          bkLog.setLogOffsetsListener(logOffsetsListener)
+          bkLog.updateHighWatermark(bkLog.logEndOffset())
+          logManager.finishedInitializingLog(topicPartition, Optional.of(bkLog))
+          future.complete(bkLog)
         }
       })
      future
@@ -1613,7 +1614,7 @@ class Partition(val topicPartition: TopicPartition,
           s"start offset from the beginning of this epoch ($epochStart)."))
 
       def getOffsetByTimestamp: CompletableFuture[OffsetResultHolder] = {
-        logManager.getLog(topicPartition)
+        logManager.getLog(topicPartition).toScala
           .map(log => log.fetchOffsetByTimestampAsync(timestamp, remoteLogManager.asInstanceOf[Option[AsyncOffsetReader]].toJava))
           .getOrElse(CompletableFuture.completedFuture(new OffsetResultHolder(Optional.empty[FileRecords.TimestampAndOffset]())))
       }

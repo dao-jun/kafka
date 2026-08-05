@@ -17,7 +17,6 @@
 package kafka.coordinator.transaction
 
 import java.nio.ByteBuffer
-import java.util.Properties
 import java.util.concurrent.{CompletableFuture, CompletionException, ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock

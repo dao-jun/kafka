@@ -85,9 +85,9 @@ public interface RaftLog extends AutoCloseable {
 
 
 
-    default CompletableFuture<LogFetchInfo> readAsync(long startOffsetInclusive, Isolation isolation) {
+    default CompletableFuture<LogFetchInfo> readAsync(long startOffsetInclusive, Isolation isolation, int maxTotalBatchBytes) {
         try {
-            return CompletableFuture.completedFuture(read(startOffsetInclusive, isolation));
+            return CompletableFuture.completedFuture(read(startOffsetInclusive, isolation, maxTotalBatchBytes));
         } catch (Throwable t) {
             return CompletableFuture.failedFuture(t);
         }
