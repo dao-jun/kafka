@@ -34,7 +34,7 @@ import org.apache.kafka.common.security.token.delegation.internals.DelegationTok
 import org.apache.kafka.common.utils.{Time, Utils}
 import org.apache.kafka.common.utils.internals.LogContext
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
-import org.apache.kafka.coordinator.common.runtime.{AsyncCoordinatorLoaderImpl, CoordinatorLoaderImpl, CoordinatorRecord}
+import org.apache.kafka.coordinator.common.runtime.{CoordinatorLoaderImpl, CoordinatorRecord}
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{GroupConfigManager, GroupCoordinator, GroupCoordinatorRecordSerde, GroupCoordinatorService}
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider
