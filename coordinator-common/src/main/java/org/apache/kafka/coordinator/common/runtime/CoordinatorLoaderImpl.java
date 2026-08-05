@@ -66,14 +66,14 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(CoordinatorLoaderImpl.class);
 
-    private final Time time;
-    private final Function<TopicPartition, Optional<UnifiedLog>> partitionLogSupplier;
+    protected final Time time;
+    protected final Function<TopicPartition, Optional<UnifiedLog>> partitionLogSupplier;
     private final Function<TopicPartition, Optional<Long>> partitionLogEndOffsetSupplier;
-    private final Deserializer<T> deserializer;
-    private final int loadBufferSize;
-    private final long commitIntervalOffsets;
+    protected final Deserializer<T> deserializer;
+    protected final int loadBufferSize;
+    protected final long commitIntervalOffsets;
 
-    private final AtomicBoolean isRunning = new AtomicBoolean(true);
+    protected final AtomicBoolean isRunning = new AtomicBoolean(true);
     private final KafkaScheduler scheduler = new KafkaScheduler(1);
 
     public CoordinatorLoaderImpl(
@@ -116,7 +116,7 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
         return future;
     }
 
-    private void doLoad(
+    protected void doLoad(
         TopicPartition tp,
         CoordinatorPlayback<T> coordinator,
         CompletableFuture<LoadSummary> future,
@@ -155,6 +155,18 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
                 lastCommittedOffset = replayResult.lastCommittedOffset;
             }
 
+            // After loading all records, ensure that lastWrittenOffset is set to the final offset.
+            // This is necessary because updateLastWrittenOffset is only called when currentOffset >=
+            // currentHighWatermark during the loop. If the loop ends without satisfying this condition,
+            // we need to update it here to ensure the coordinator state is consistent.
+            coordinator.updateLastWrittenOffset(currentOffset);
+
+            // Also update lastCommittedOffset if needed
+            long finalHighWatermark = log.highWatermark();
+            if (finalHighWatermark > lastCommittedOffset) {
+                coordinator.updateLastCommittedOffset(finalHighWatermark);
+            }
+
             long endTimeMs = time.milliseconds();
 
             if (logEndOffset(tp) == -1L) {
@@ -170,7 +182,7 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
         }
     }
 
-    private long logEndOffset(TopicPartition tp) {
+    protected long logEndOffset(TopicPartition tp) {
         return partitionLogEndOffsetSupplier.apply(tp).orElse(-1L);
     }
 
@@ -186,11 +198,11 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
      * <li>The loader is still running.</li>
      * </ul>
      */
-    private boolean shouldFetchNextBatch(long currentOffset, long logEndOffset, boolean readAtLeastOneRecord) {
+    protected boolean shouldFetchNextBatch(long currentOffset, long logEndOffset, boolean readAtLeastOneRecord) {
         return currentOffset < logEndOffset && readAtLeastOneRecord && isRunning.get();
     }
 
-    private MemoryRecords toReadableMemoryRecords(TopicPartition tp, Records records, ByteBuffer buffer) throws IOException {
+    protected MemoryRecords toReadableMemoryRecords(TopicPartition tp, Records records, ByteBuffer buffer) throws IOException {
         if (records instanceof MemoryRecords memoryRecords) {
             return memoryRecords;
         } else if (records instanceof FileRecords fileRecords) {
@@ -217,7 +229,7 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
         }
     }
 
-    private ReplayResult processMemoryRecords(
+    protected ReplayResult processMemoryRecords(
         TopicPartition tp,
         UnifiedLog log,
         MemoryRecords memoryRecords,
@@ -332,10 +344,10 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
     /**
      * A helper class to track key metrics during the data loading operation.
      */
-    private static class LoadStats {
-        private long numRecords = 0L;
-        private long numBytes = 0L;
-        private boolean readAtLeastOneRecord = true;
+    protected static class LoadStats {
+        protected long numRecords = 0L;
+        protected long numBytes = 0L;
+        protected boolean readAtLeastOneRecord = true;
 
         @Override
         public String toString() {
@@ -347,5 +359,5 @@ public class CoordinatorLoaderImpl<T> implements CoordinatorLoader<T> {
         }
     }
 
-    private record ReplayResult(long nextOffset, long lastCommittedOffset) { }
+    protected record ReplayResult(long nextOffset, long lastCommittedOffset) { }
 }

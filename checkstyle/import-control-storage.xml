@@ -42,6 +42,15 @@
     <allow pkg="javax.annotation" />
     <allow pkg="io.opentelemetry" />
 
+    <!-- Async kafka imports -->
+    <allow pkg="org.apache.pulsar" />
+    <allow pkg="com.google" />
+    <allow pkg="org.apache.commons" />
+    <allow pkg="io.netty" />
+    <allow pkg="org.apache.bookkeeper" />
+    <allow pkg="javax.annotation" />
+    <allow pkg="io.opentelemetry" />
+
     <!-- no one depends on the server -->
     <disallow pkg="kafka" />
 

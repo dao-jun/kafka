@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -81,11 +82,11 @@ public class LocalLog {
     private final LogSegments segments;
     private final Scheduler scheduler;
     private final Time time;
-    private final TopicPartition topicPartition;
+    protected final TopicPartition topicPartition;
     private final LogDirFailureChannel logDirFailureChannel;
     private final Logger logger;
 
-    private volatile LogOffsetMetadata nextOffsetMetadata;
+    protected volatile LogOffsetMetadata nextOffsetMetadata;
     // The memory mapped buffer for index files of this log will be closed with either delete() or closeHandlers()
     // After memory mapped buffer is closed, no disk IO operation should be performed for this log.
     private volatile boolean isMemoryMappedBufferClosed = false;
@@ -524,9 +525,31 @@ public class LocalLog {
         );
     }
 
+    public CompletableFuture<FetchDataInfo> readAsync(long startOffset,
+                                                      int maxLength,
+                                                      boolean minOneMessage,
+                                                      LogOffsetMetadata maxOffsetMetadata,
+                                                      boolean includeAbortedTxns) {
+        try {
+            return CompletableFuture.completedFuture(read(startOffset, maxLength, minOneMessage,
+                    maxOffsetMetadata, includeAbortedTxns));
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
+    }
+
     public void append(long lastOffset, MemoryRecords records) throws IOException {
         segments.activeSegment().append(lastOffset, records);
         updateLogEndOffset(lastOffset + 1);
+    }
+
+    public CompletableFuture<Long> appendAsync(LogAppendInfo appendInfo, MemoryRecords records) {
+        try {
+            append(appendInfo.lastOffset(), records);
+            return CompletableFuture.completedFuture(null);
+        } catch (Throwable t) {
+            return CompletableFuture.failedFuture(t);
+        }
     }
 
     FetchDataInfo addAbortedTransactions(long startOffset, LogSegment segment, FetchDataInfo fetchInfo) throws IOException {

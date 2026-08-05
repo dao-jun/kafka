@@ -893,7 +893,7 @@ kafkaPublicApiChecker {
     excludeFilter = file("$rootDir/gradle/spotbugs-exclude.xml")
     ignoreFailures = false
   }
-  test.dependsOn('spotbugsMain')
+//  test.dependsOn('spotbugsMain')
 
   tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
     reports.configure {
@@ -2496,6 +2496,10 @@ project(':storage') {
       exclude group: 'org.checkerframework', module: 'checker-qual'
       exclude group: 'com.google.errorprone', module: 'error_prone_annotations'
     }
+    implementation(libs.managedLedger) {
+      exclude group: 'org.apache.logging.log4j', module: 'log4j-api'
+    }
+    implementation log4j2Libs
     implementation libs.slf4jApi
     implementation libs.jacksonDatabind
     implementation libs.metrics

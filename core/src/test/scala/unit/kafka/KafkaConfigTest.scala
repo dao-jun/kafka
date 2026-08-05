@@ -30,6 +30,7 @@ import org.apache.kafka.common.utils.internals.Exit
 import org.apache.kafka.network.SocketServerConfigs
 import org.apache.kafka.raft.{KRaftConfigs, QuorumConfig}
 import org.apache.kafka.server.config.ReplicationConfigs
+import org.apache.kafka.storage.internals.log.LogConfig
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test}
 import org.junit.jupiter.api.Assertions._
 
@@ -314,6 +315,30 @@ class KafkaConfigTest {
     val expected = 3600000
     val config = KafkaConfig.fromProps(Kafka.getPropsFromArgs(Array(propertiesFile, "--override", s"sasl_ssl.oauthbearer.connections.max.reauth.ms=$expected")))
     assertEquals(expected, config.valuesWithPrefixOverride("sasl_ssl.oauthbearer.").get(BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS_CONFIG).asInstanceOf[Long])
+  }
+
+
+  @Test
+  def testAsyncLogModeConfigs(): Unit = {
+    val propertiesFile = prepareAsyncLogConfig()
+    val config = KafkaConfig.fromProps(Kafka.getPropsFromArgs(Array(propertiesFile)))
+    val logConfigMap = config.extractLogConfigMap
+    val logConfig = new LogConfig(logConfigMap)
+    assertTrue(logConfig.asyncLogModeEnable)
+    assertEquals(logConfig.metadataStoreUrl, "oxia://localhost:6500")
+  }
+
+  def prepareAsyncLogConfig(): String = {
+    prepareConfig(Array(
+      "node.id=1",
+      "process.roles=controller",
+      "controller.listener.names=CONTROLLER",
+      "controller.quorum.voters=1@localhost:9093,2@localhost:9093",
+      "listeners=CONTROLLER://:9093",
+      "advertised.listeners=CONTROLLER://127.0.0.1:9093",
+      "log.async.mode.enable=true",
+      "bookkeeper.metadata.store.url=oxia://localhost:6500"
+    ))
   }
 
   def prepareDefaultConfig(): String = {

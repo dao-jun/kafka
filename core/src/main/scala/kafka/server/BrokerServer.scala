@@ -19,7 +19,7 @@ package kafka.server
 
 import kafka.coordinator.group.CoordinatorPartitionWriter
 import kafka.coordinator.transaction.TransactionCoordinator
-import kafka.log.LogManager
+import kafka.log.{AsyncLogManager, LogManager}
 import kafka.network.SocketServer
 import kafka.raft.KafkaRaftManager
 import kafka.server.metadata._
@@ -34,7 +34,7 @@ import org.apache.kafka.common.security.token.delegation.internals.DelegationTok
 import org.apache.kafka.common.utils.{Time, Utils}
 import org.apache.kafka.common.utils.internals.LogContext
 import org.apache.kafka.common.{ClusterResource, TopicPartition, Uuid}
-import org.apache.kafka.coordinator.common.runtime.{CoordinatorLoaderImpl, CoordinatorRecord}
+import org.apache.kafka.coordinator.common.runtime.{AsyncCoordinatorLoaderImpl, CoordinatorLoaderImpl, CoordinatorRecord}
 import org.apache.kafka.coordinator.group.metrics.{GroupCoordinatorMetrics, GroupCoordinatorRuntimeMetrics}
 import org.apache.kafka.coordinator.group.{GroupConfigManager, GroupCoordinator, GroupCoordinatorRecordSerde, GroupCoordinatorService}
 import org.apache.kafka.coordinator.group.modern.share.ShareGroupConfigProvider
@@ -180,6 +180,8 @@ class BrokerServer(
 
   private var shareGroupLogReader: ReplicaManagerLogReader = _
 
+  private val asyncLogModeEnable: Boolean = config.asyncLogModeEnable
+
   private def maybeChangeStatus(from: ProcessStatus, to: ProcessStatus): Boolean = {
     lock.lock()
     try {
@@ -225,13 +227,25 @@ class BrokerServer(
 
       // Create log manager, but don't start it because we need to delay any potential unclean shutdown log recovery
       // until we catch up on the metadata log and have up-to-date topic and broker configs.
-      logManager = LogManager(config,
-        sharedServer.metaPropsEnsemble.errorLogDirs(),
-        metadataCache,
-        kafkaScheduler,
-        time,
-        brokerTopicStats,
-        logDirFailureChannel)
+      logManager = if (!asyncLogModeEnable) {
+        LogManager(config,
+          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel)
+      } else {
+        AsyncLogManager(
+          config,
+          sharedServer.metaPropsEnsemble.errorLogDirs().asScala.toSeq,
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel
+        )
+      }
 
       lifecycleManager = new BrokerLifecycleManager(
         config,
@@ -359,24 +373,50 @@ class BrokerServer(
        */
       val defaultActionQueue = new DelayedActionQueue
 
-      this._replicaManager = new ReplicaManager(
-        config = config,
-        metrics = metrics,
-        time = time,
-        scheduler = kafkaScheduler,
-        logManager = logManager,
-        remoteLogManager = remoteLogManagerOpt,
-        quotaManagers = quotaManagers,
-        metadataCache = metadataCache,
-        logDirFailureChannel = logDirFailureChannel,
-        alterPartitionManager = alterPartitionManager,
-        brokerTopicStats = brokerTopicStats,
-        delayedRemoteFetchPurgatoryParam = None,
-        brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
-        addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
-        directoryEventHandler = directoryEventHandler,
-        defaultActionQueue = defaultActionQueue
-      )
+      this._replicaManager = if (!asyncLogModeEnable) {
+        new ReplicaManager(
+          config = config,
+          metrics = metrics,
+          time = time,
+          scheduler = kafkaScheduler,
+          logManager = logManager,
+          remoteLogManager = remoteLogManagerOpt,
+          quotaManagers = quotaManagers,
+          metadataCache = metadataCache,
+          logDirFailureChannel = logDirFailureChannel,
+          alterPartitionManager = alterPartitionManager,
+          brokerTopicStats = brokerTopicStats,
+          delayedRemoteFetchPurgatoryParam = None,
+          brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
+          addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
+          directoryEventHandler = directoryEventHandler,
+          defaultActionQueue = defaultActionQueue
+        )
+      } else {
+        new AsyncReplicaManager(
+          config = config,
+          metrics = metrics,
+          time = time,
+          scheduler = kafkaScheduler,
+          logManager = logManager,
+          remoteLogManager = remoteLogManagerOpt,
+          quotaManagers = quotaManagers,
+          metadataCache = metadataCache,
+          logDirFailureChannel = logDirFailureChannel,
+          alterPartitionManager = alterPartitionManager,
+          brokerTopicStats = brokerTopicStats,
+          delayedProducePurgatoryParam = None,
+          delayedFetchPurgatoryParam = None,
+          delayedDeleteRecordsPurgatoryParam = None,
+          delayedRemoteFetchPurgatoryParam = None,
+          delayedRemoteListOffsetsPurgatoryParam = None,
+          delayedShareFetchPurgatoryParam = None,
+          brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
+          addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
+          directoryEventHandler = directoryEventHandler,
+          defaultActionQueue = defaultActionQueue
+        )
+      }
 
       /* start token manager */
       tokenManager = new DelegationTokenManager(new DelegationTokenManagerConfigs(config), tokenCache)
@@ -696,14 +736,25 @@ class BrokerServer(
       "group-coordinator-reaper",
       new SystemTimer("group-coordinator")
     )
-    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
-      time,
-      tp => replicaManager.getLog(tp).toJava,
-      tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-      serde,
-      config.groupCoordinatorConfig.offsetsLoadBufferSize,
-      CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-    )
+    val loader = if (!asyncLogModeEnable) {
+      new CoordinatorLoaderImpl[CoordinatorRecord](
+        time,
+        tp => replicaManager.getLog(tp).toJava,
+        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+        serde,
+        config.groupCoordinatorConfig.offsetsLoadBufferSize,
+        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+      )
+    } else {
+      new AsyncCoordinatorLoaderImpl[CoordinatorRecord](
+        time,
+        tp => replicaManager.getLog(tp).toJava,
+        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+        serde,
+        config.groupCoordinatorConfig.offsetsLoadBufferSize,
+        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+      )
+    }
     val writer = new CoordinatorPartitionWriter(
       replicaManager
     )
@@ -718,6 +769,7 @@ class BrokerServer(
       .withPersister(persister)
       .withAuthorizerPlugin(authorizerPlugin.toJava)
       .withPartitionMetadataClient(partitionMetadataClient)
+      .withAsyncCoordinator(false)
       .build()
   }
 
@@ -729,14 +781,25 @@ class BrokerServer(
     )
 
     val serde = new ShareCoordinatorRecordSerde
-    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
-      time,
-      tp => replicaManager.getLog(tp).toJava,
-      tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-      serde,
-      config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
-      CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-    )
+    val loader = if (!asyncLogModeEnable) {
+      new CoordinatorLoaderImpl[CoordinatorRecord](
+        time,
+        tp => replicaManager.getLog(tp).toJava,
+        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+        serde,
+        config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
+        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+      )
+    } else {
+      new AsyncCoordinatorLoaderImpl[CoordinatorRecord](
+        time,
+        tp => replicaManager.getLog(tp).toJava,
+        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+        serde,
+        config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
+        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+      )
+    }
     val writer = new CoordinatorPartitionWriter(
       replicaManager
     )
@@ -747,6 +810,8 @@ class BrokerServer(
       .withWriter(writer)
       .withCoordinatorRuntimeMetrics(new ShareCoordinatorRuntimeMetrics(metrics))
       .withCoordinatorMetrics(new ShareCoordinatorMetrics(metrics))
+      .withShareGroupEnabledConfigSupplier(() => config.shareGroupConfig.isShareGroupEnabled)
+      .withAsyncCoordinator(false)
       .build()
   }
 

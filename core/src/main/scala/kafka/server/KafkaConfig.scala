@@ -23,12 +23,13 @@ import java.util.Properties
 import kafka.utils.Logging
 import kafka.utils.Implicits._
 import org.apache.kafka.common.{Endpoint, Reconfigurable}
-import org.apache.kafka.common.config.{ConfigDef, ConfigException, TopicConfig}
+import org.apache.kafka.common.config.{AsyncLogConfigs, ConfigDef, ConfigException, ConfigResource, TopicConfig}
 import org.apache.kafka.common.config.ConfigDef.ConfigKey
 import org.apache.kafka.common.config.internals.BrokerSecurityConfigs
 import org.apache.kafka.common.internals.Plugin
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.security.auth.KafkaPrincipalSerde
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.Utils
@@ -44,6 +45,7 @@ import org.apache.kafka.server.authorizer.Authorizer
 import org.apache.kafka.server.config.{AbstractKafkaConfig, QuotaConfig, ReplicationConfigs, ServerConfigs, ServerLogConfigs, DynamicBrokerConfig => JDynamicBrokerConfig}
 import org.apache.kafka.server.log.remote.storage.RemoteLogManagerConfig
 import org.apache.kafka.server.metrics.MetricConfigs
+import org.apache.kafka.storage.internals.log.CleanerConfig
 
 import scala.jdk.CollectionConverters._
 import scala.collection.{Map, Seq}
@@ -238,6 +240,127 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
 
   /***************** rack configuration **************/
   val replicaSelectorClassName = Option(getString(ReplicationConfigs.REPLICA_SELECTOR_CLASS_CONFIG))
+
+  /** ********* Log Configuration ***********/
+  val autoCreateTopicsEnable = getBoolean(ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG)
+  val numPartitions = getInt(ServerLogConfigs.NUM_PARTITIONS_CONFIG)
+  def logSegmentBytes = getInt(ServerLogConfigs.LOG_SEGMENT_BYTES_CONFIG)
+  def logFlushIntervalMessages = getLong(ServerLogConfigs.LOG_FLUSH_INTERVAL_MESSAGES_CONFIG)
+  def logCleanerThreads = getInt(CleanerConfig.LOG_CLEANER_THREADS_PROP)
+  val logFlushSchedulerIntervalMs = getLong(ServerLogConfigs.LOG_FLUSH_SCHEDULER_INTERVAL_MS_CONFIG)
+  val logFlushOffsetCheckpointIntervalMs = getInt(ServerLogConfigs.LOG_FLUSH_OFFSET_CHECKPOINT_INTERVAL_MS_CONFIG).toLong
+  val logFlushStartOffsetCheckpointIntervalMs = getInt(ServerLogConfigs.LOG_FLUSH_START_OFFSET_CHECKPOINT_INTERVAL_MS_CONFIG).toLong
+  val logCleanupIntervalMs = getLong(ServerLogConfigs.LOG_CLEANUP_INTERVAL_MS_CONFIG)
+  def logCleanupPolicy = getList(ServerLogConfigs.LOG_CLEANUP_POLICY_CONFIG)
+
+  def logRetentionBytes = getLong(ServerLogConfigs.LOG_RETENTION_BYTES_CONFIG)
+  def logCleanerDedupeBufferSize = getLong(CleanerConfig.LOG_CLEANER_DEDUPE_BUFFER_SIZE_PROP)
+  def logCleanerDeleteRetentionMs = getLong(CleanerConfig.LOG_CLEANER_DELETE_RETENTION_MS_PROP)
+  def logCleanerMinCompactionLagMs = getLong(CleanerConfig.LOG_CLEANER_MIN_COMPACTION_LAG_MS_PROP)
+  def logCleanerMaxCompactionLagMs = getLong(CleanerConfig.LOG_CLEANER_MAX_COMPACTION_LAG_MS_PROP)
+  def logCleanerMinCleanRatio = getDouble(CleanerConfig.LOG_CLEANER_MIN_CLEAN_RATIO_PROP)
+  def logIndexSizeMaxBytes = getInt(ServerLogConfigs.LOG_INDEX_SIZE_MAX_BYTES_CONFIG)
+  def logIndexIntervalBytes = getInt(ServerLogConfigs.LOG_INDEX_INTERVAL_BYTES_CONFIG)
+  def logDeleteDelayMs = getLong(ServerLogConfigs.LOG_DELETE_DELAY_MS_CONFIG)
+  def logRollTimeMillis: java.lang.Long = Option(getLong(ServerLogConfigs.LOG_ROLL_TIME_MILLIS_CONFIG)).getOrElse(60 * 60 * 1000L * getInt(ServerLogConfigs.LOG_ROLL_TIME_HOURS_CONFIG))
+  def logRollTimeJitterMillis: java.lang.Long = Option(getLong(ServerLogConfigs.LOG_ROLL_TIME_JITTER_MILLIS_CONFIG)).getOrElse(60 * 60 * 1000L * getInt(ServerLogConfigs.LOG_ROLL_TIME_JITTER_HOURS_CONFIG))
+  def logFlushIntervalMs: java.lang.Long = Option(getLong(ServerLogConfigs.LOG_FLUSH_INTERVAL_MS_CONFIG)).getOrElse(getLong(ServerLogConfigs.LOG_FLUSH_SCHEDULER_INTERVAL_MS_CONFIG))
+  def minInSyncReplicas = getInt(ServerLogConfigs.MIN_IN_SYNC_REPLICAS_CONFIG)
+  def logPreAllocateEnable: java.lang.Boolean = getBoolean(ServerLogConfigs.LOG_PRE_ALLOCATE_CONFIG)
+  def logInitialTaskDelayMs: java.lang.Long = Option(getLong(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_CONFIG)).getOrElse(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT)
+
+  def logMessageTimestampType = TimestampType.forName(getString(ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_TYPE_CONFIG))
+
+  def logMessageTimestampBeforeMaxMs: Long = getLong(ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG)
+
+  def logMessageTimestampAfterMaxMs: Long = getLong(ServerLogConfigs.LOG_MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG)
+
+  def logDirFailureTimeoutMs: Long = getLong(ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_CONFIG)
+
+
+  /** ********* AsyncLogMode configuration ********** */
+  def asyncLogModeEnable: Boolean = getBoolean(AsyncLogConfigs.LOG_ASYNC_MODE)
+  def bookkeeperEnsembleSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_ENSEMBLE_SIZE)
+  def bookkeeperWriteQuorumSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_WRITE_QUORUM_SIZE)
+  def bookkeeperAckQuorumSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_ACK_QUORUM_SIZE)
+  def bookkeeperLedgerDeleteMaxConcurrentRequests: Int = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETE_MAX_CONCURRENT_REQUESTS)
+  def bookkeeperLedgerDeletionThreads: Int = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETION_THREADS)
+  def bookkeeperDigestType: String = getString(AsyncLogConfigs.BOOKKEEPER_DIGEST_TYPE)
+  def bookkeeperPassword: String = getString(AsyncLogConfigs.BOOKKEEPER_PASSWORD)
+  def bookkeeperMaxEntriesPerLedger: Int = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_ENTRIES_PER_LEDGER)
+  def bookkeeperMaxBytesPerLedgerMb: Int = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_BYTES_PER_LEDGER_MB)
+  def bookkeeperMinRolloverTimeMinutes: Int = getInt(AsyncLogConfigs.BOOKKEEPER_MIN_ROLLOVER_TIME_MINUTES)
+  def bookkeeperMaxRolloverTimeMinutes: Int = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_ROLLOVER_TIME_MINUTES)
+  def bookkeeperMetadataOperationTimeoutSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_OPERATION_TIMEOUT_SECONDS)
+  def bookkeeperReadEntryTimeoutSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_READ_ENTRY_TIMEOUT_SECONDS)
+  def bookkeeperAddEntryTimeoutSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_ADD_ENTRY_TIMEOUT_SECONDS)
+  def bookkeeperMetadataEnsembleSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_ENSEMBLE_SIZE)
+  def bookkeeperMetadataWriteQuorumSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_WRITE_QUORUM_SIZE)
+  def bookkeeperMetadataAckQuorumSize: Int = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_ACK_QUORUM_SIZE)
+  def bookkeeperMetadataMaxEntriesPerLedger: Int = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_MAX_ENTRIES_PER_LEDGER)
+  def bookkeeperLedgerRolloverTimeoutSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_ROLLOVER_TIMEOUT_SECONDS)
+  def bookkeeperRetentionTimeSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_RETENTION_TIME_SECONDS)
+  def bookkeeperRetentionSizeMb: Int = getInt(AsyncLogConfigs.BOOKKEEPER_RETENTION_SIZE_MB)
+  def bookkeeperAutoSkipNonrecoverableData: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_AUTO_SKIP_NONRECORVERABLE_DATA)
+  def bookkeeperLedgerForceRecovery: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_LEDGER_FORCE_RECOVERY)
+  def bookkeeperInactiveLedgerRolloverTimeSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_INACTIVE_LEDGER_ROLLOVER_TIME_SECONDS)
+  def bookkeeperMetadataStoreUrl: String = getString(AsyncLogConfigs.BOOKKEEPER_METADATA_STORE_URL)
+
+  /** ********* Managed Ledger Factory configuration ********** */
+  def mlMaxCacheSizeMb: Int = getInt(AsyncLogConfigs.ML_MAX_CACHE_SIZE_MB)
+  def mlCacheEvictionWatermark: Double = getDouble(AsyncLogConfigs.ML_CACHE_EVICTION_WATERMARK)
+  def mlNumSchedulerThreads: Int = getInt(AsyncLogConfigs.ML_NUM_SCHEDULER_THREADS)
+  def mlCacheEvictionIntervalMs: Int = getInt(AsyncLogConfigs.ML_CACHE_EVICTION_INTERVAL_MS)
+  def mlCacheEvictionTimeThresholdMs: Int = getInt(AsyncLogConfigs.ML_CACHE_EVICTION_TIME_THRESHOLD_MS)
+  def mlCopyEntriesInCache: Boolean = getBoolean(AsyncLogConfigs.ML_COPY_ENTRIES_IN_CACHE)
+  def mlMaxReadInFlightSizeMb: Int = getInt(AsyncLogConfigs.ML_MAX_READ_IN_FLIGHT_SIZE_MB)
+  def mlMaxReadsInflightSize: Int = getInt(AsyncLogConfigs.ML_MAX_READS_INFLIGHT_SIZE)
+  def mlMaxReadInflightPermitsAcquireTimeoutMs: Int = getInt(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_TIMEOUT_MS)
+  def mlMaxReadInflightPermitsAcquireQueueSize: Int = getInt(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_QUEUE_SIZE)
+  def mlPrometheusStatsLatencyRolloverSeconds: Int = getInt(AsyncLogConfigs.ML_PROMETHEUS_STATS_LATENCY_ROLLOVER_SECONDS)
+  def mlTraceTaskExecution: Boolean = getBoolean(AsyncLogConfigs.ML_TRACE_TASK_EXECUTION)
+  def mlInfoCompressionType: String = getString(AsyncLogConfigs.ML_INFO_COMPRESSION_TYPE)
+  def mlInfoCompressionThresholdBytes: Int = getInt(AsyncLogConfigs.ML_INFO_COMPRESSION_THRESHOLD_BYTES)
+  def mlStatsPeriodSeconds: Int = getInt(AsyncLogConfigs.ML_STATS_PERIOD_SECONDS)
+
+  /** ********* Bookkeeper Client configuration ********** */
+  def bookkeeperClientAuthenticationPlugin: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PLUGIN)
+  def bookkeeperClientAuthenticationParameters: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS)
+  def bookkeeperClientTlsAuthentication: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_AUTHENTICATION)
+  def bookkeeperClientTlsCertificateFilePath: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERTIFICATE_FILE_PATH)
+  def bookkeeperClientTlsKeyFilePath: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_PATH)
+  def bookkeeperClientTlsKeyFileType: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_TYPE)
+  def bookkeeperClientTlsKeyStorePasswordPath: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_STORE_PASSWORD_PATH)
+  def bookkeeperClientTlsProviderFactoryClass: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_PROVIDER_FACTORY_CLASS)
+  def bookkeeperClientTlsTrustCertsFilePath: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERTS_FILE_PATH)
+  def bookkeeperClientTlsTrustCertTypes: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERT_TYPES)
+  def bookkeeperClientTlsTrustStorePasswordPath: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_STORE_PASSWORD_PATH)
+  def bookkeeperClientTlsCertFilesRefreshDurationSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERT_FILES_REFRESH_DURATION_SECONDS)
+  def bookkeeperClientEnableBusyWait: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_BUSY_WAIT)
+  def bookkeeperClientNumWorkerThreads: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_WORKER_THREADS)
+  def bookkeeperClientThrottleValue: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_THROTTLE_VALUE)
+  def bookkeeperClientMetadataSessionTimeoutMillis: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SESSION_TIMEOUT_MILLIS)
+  def bookkeeperClientTimeoutSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_TIMEOUT_SECONDS)
+  def bookkeeperClientSpeculativeReadTimeoutMillis: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_SPECULATIVE_READ_TIMEOUT_MILLIS)
+  def bookkeeperClientNumberOfChannelPerBookie: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE)
+  def bookkeeperClientUseV2WireProtocol: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_USE_V2_WIRE_PROTOCOL)
+  def bookkeeperClientEnableStickyReads: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_STICKY_READS)
+  def bookkeeperClientNettyMaxFrameSizeBytes: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NETTY_MAX_FRAME_SIZE_BYTES)
+  def bookkeeperClientDiskWeightBasedPlacementEnabled: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_DISK_WEIGHT_BASED_PLACEMENT_ENABLED)
+  def bookkeeperClientMetadataServiceUrl: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SERVICE_URL)
+  def bookkeeperClientHealthCheckEnabled: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ENABLED)
+  def bookkeeperClientHealthCheckIntervalSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_INTERVAL_SECONDS)
+  def bookkeeperClientHealthCheckErrorThresholdPerInterval: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ERROR_THRESHOLD_PER_INTERVAL)
+  def bookkeeperClientHealthCheckQuarantineTimeInSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_QUARANTINE_TIME_IN_SECONDS)
+  def bookkeeperClientQuarantineRatio: Double = getDouble(AsyncLogConfigs.BOOKKEEPER_CLIENT_QUARANTINE_RATIO)
+  def bookkeeperClientReorderReadSequenceEnabled: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_REORDER_READ_SEQUENCE_ENABLED)
+  def bookkeeperClientExplicitLacIntervalInMills: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_EXPLICIT_LAC_INTERVAL_IN_MILLS)
+  def bookkeeperClientGetBookieInfoIntervalSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_INTERVAL_SECONDS)
+  def bookkeeperClientGetBookieInfoRetryIntervalSeconds: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_RETRY_INTERVAL_SECONDS)
+  def bookkeeperClientNumIoThreads: Int = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_IO_THREADS)
+  def bookkeeperClientLimitStatsLogging: Boolean = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_LIMIT_STATS_LOGGING)
+  def bookkeeperClientAuthenticationParametersName: String = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS_NAME)
+
 
   /** ********* Replication configuration ***********/
   val replicaLagTimeMaxMs = getLong(ReplicationConfigs.REPLICA_LAG_TIME_MAX_MS_CONFIG)
@@ -635,6 +758,97 @@ class KafkaConfig private(doLog: Boolean, val props: util.Map[_, _])
     logProps.put(TopicConfig.LOCAL_LOG_RETENTION_BYTES_CONFIG, remoteLogManagerConfig.logLocalRetentionBytes: java.lang.Long)
     logProps.put(TopicConfig.REMOTE_COPY_LAG_MS_CONFIG, remoteLogManagerConfig.logRemoteCopyLagMs: java.lang.Long)
     logProps.put(TopicConfig.REMOTE_COPY_LAG_BYTES_CONFIG, remoteLogManagerConfig.logRemoteCopyLagBytes: java.lang.Long)
+    appendLogConfigMap(logProps)
     logProps
+  }
+
+  private def appendLogConfigMap(props: java.util.Map[String, Object]): Unit = {
+    // Helper method to put non-null values only
+    def putIfNotNull(key: String, value: AnyRef): Unit = {
+      if (value != null) props.put(key, value)
+    }
+
+    // AsyncLogMode configuration
+    props.put(AsyncLogConfigs.LOG_ASYNC_MODE, asyncLogModeEnable: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_ENSEMBLE_SIZE, bookkeeperEnsembleSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_WRITE_QUORUM_SIZE, bookkeeperWriteQuorumSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_ACK_QUORUM_SIZE, bookkeeperAckQuorumSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETE_MAX_CONCURRENT_REQUESTS, bookkeeperLedgerDeleteMaxConcurrentRequests: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETION_THREADS, bookkeeperLedgerDeletionThreads: java.lang.Integer)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_DIGEST_TYPE, bookkeeperDigestType)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_PASSWORD, bookkeeperPassword)
+    props.put(AsyncLogConfigs.BOOKKEEPER_MAX_ENTRIES_PER_LEDGER, bookkeeperMaxEntriesPerLedger: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_MAX_BYTES_PER_LEDGER_MB, bookkeeperMaxBytesPerLedgerMb: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_MIN_ROLLOVER_TIME_MINUTES, bookkeeperMinRolloverTimeMinutes: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_MAX_ROLLOVER_TIME_MINUTES, bookkeeperMaxRolloverTimeMinutes: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_METADATA_OPERATION_TIMEOUT_SECONDS, bookkeeperMetadataOperationTimeoutSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_READ_ENTRY_TIMEOUT_SECONDS, bookkeeperReadEntryTimeoutSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_ADD_ENTRY_TIMEOUT_SECONDS, bookkeeperAddEntryTimeoutSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_METADATA_ENSEMBLE_SIZE, bookkeeperMetadataEnsembleSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_METADATA_WRITE_QUORUM_SIZE, bookkeeperMetadataWriteQuorumSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_METADATA_ACK_QUORUM_SIZE, bookkeeperMetadataAckQuorumSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_METADATA_MAX_ENTRIES_PER_LEDGER, bookkeeperMetadataMaxEntriesPerLedger: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_LEDGER_ROLLOVER_TIMEOUT_SECONDS, bookkeeperLedgerRolloverTimeoutSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_RETENTION_TIME_SECONDS, bookkeeperRetentionTimeSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_RETENTION_SIZE_MB, bookkeeperRetentionSizeMb: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_AUTO_SKIP_NONRECORVERABLE_DATA, bookkeeperAutoSkipNonrecoverableData: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_LEDGER_FORCE_RECOVERY, bookkeeperLedgerForceRecovery: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_INACTIVE_LEDGER_ROLLOVER_TIME_SECONDS, bookkeeperInactiveLedgerRolloverTimeSeconds: java.lang.Integer)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_METADATA_STORE_URL, bookkeeperMetadataStoreUrl)
+
+    // Managed Ledger Factory configuration
+    props.put(AsyncLogConfigs.ML_MAX_CACHE_SIZE_MB, mlMaxCacheSizeMb: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_CACHE_EVICTION_WATERMARK, mlCacheEvictionWatermark: java.lang.Double)
+    props.put(AsyncLogConfigs.ML_NUM_SCHEDULER_THREADS, mlNumSchedulerThreads: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_CACHE_EVICTION_INTERVAL_MS, mlCacheEvictionIntervalMs: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_CACHE_EVICTION_TIME_THRESHOLD_MS, mlCacheEvictionTimeThresholdMs: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_COPY_ENTRIES_IN_CACHE, mlCopyEntriesInCache: java.lang.Boolean)
+    props.put(AsyncLogConfigs.ML_MAX_READ_IN_FLIGHT_SIZE_MB, mlMaxReadInFlightSizeMb: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_MAX_READS_INFLIGHT_SIZE, mlMaxReadsInflightSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_TIMEOUT_MS, mlMaxReadInflightPermitsAcquireTimeoutMs: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_QUEUE_SIZE, mlMaxReadInflightPermitsAcquireQueueSize: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_PROMETHEUS_STATS_LATENCY_ROLLOVER_SECONDS, mlPrometheusStatsLatencyRolloverSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_TRACE_TASK_EXECUTION, mlTraceTaskExecution: java.lang.Boolean)
+    putIfNotNull(AsyncLogConfigs.ML_INFO_COMPRESSION_TYPE, mlInfoCompressionType)
+    props.put(AsyncLogConfigs.ML_INFO_COMPRESSION_THRESHOLD_BYTES, mlInfoCompressionThresholdBytes: java.lang.Integer)
+    props.put(AsyncLogConfigs.ML_STATS_PERIOD_SECONDS, mlStatsPeriodSeconds: java.lang.Integer)
+
+    // Bookkeeper Client configuration
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PLUGIN, bookkeeperClientAuthenticationPlugin)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS, bookkeeperClientAuthenticationParameters)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_AUTHENTICATION, bookkeeperClientTlsAuthentication: java.lang.Boolean)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERTIFICATE_FILE_PATH, bookkeeperClientTlsCertificateFilePath)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_PATH, bookkeeperClientTlsKeyFilePath)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_TYPE, bookkeeperClientTlsKeyFileType)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_STORE_PASSWORD_PATH, bookkeeperClientTlsKeyStorePasswordPath)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_PROVIDER_FACTORY_CLASS, bookkeeperClientTlsProviderFactoryClass)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERTS_FILE_PATH, bookkeeperClientTlsTrustCertsFilePath)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERT_TYPES, bookkeeperClientTlsTrustCertTypes)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_STORE_PASSWORD_PATH, bookkeeperClientTlsTrustStorePasswordPath)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERT_FILES_REFRESH_DURATION_SECONDS, bookkeeperClientTlsCertFilesRefreshDurationSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_BUSY_WAIT, bookkeeperClientEnableBusyWait: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_WORKER_THREADS, bookkeeperClientNumWorkerThreads: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_THROTTLE_VALUE, bookkeeperClientThrottleValue: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SESSION_TIMEOUT_MILLIS, bookkeeperClientMetadataSessionTimeoutMillis: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_TIMEOUT_SECONDS, bookkeeperClientTimeoutSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_SPECULATIVE_READ_TIMEOUT_MILLIS, bookkeeperClientSpeculativeReadTimeoutMillis: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE, bookkeeperClientNumberOfChannelPerBookie: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_USE_V2_WIRE_PROTOCOL, bookkeeperClientUseV2WireProtocol: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_STICKY_READS, bookkeeperClientEnableStickyReads: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_NETTY_MAX_FRAME_SIZE_BYTES, bookkeeperClientNettyMaxFrameSizeBytes: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_DISK_WEIGHT_BASED_PLACEMENT_ENABLED, bookkeeperClientDiskWeightBasedPlacementEnabled: java.lang.Boolean)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SERVICE_URL, bookkeeperClientMetadataServiceUrl)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ENABLED, bookkeeperClientHealthCheckEnabled: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_INTERVAL_SECONDS, bookkeeperClientHealthCheckIntervalSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ERROR_THRESHOLD_PER_INTERVAL, bookkeeperClientHealthCheckErrorThresholdPerInterval: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_QUARANTINE_TIME_IN_SECONDS, bookkeeperClientHealthCheckQuarantineTimeInSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_QUARANTINE_RATIO, bookkeeperClientQuarantineRatio: java.lang.Double)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_REORDER_READ_SEQUENCE_ENABLED, bookkeeperClientReorderReadSequenceEnabled: java.lang.Boolean)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_EXPLICIT_LAC_INTERVAL_IN_MILLS, bookkeeperClientExplicitLacIntervalInMills: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_INTERVAL_SECONDS, bookkeeperClientGetBookieInfoIntervalSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_RETRY_INTERVAL_SECONDS, bookkeeperClientGetBookieInfoRetryIntervalSeconds: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_IO_THREADS, bookkeeperClientNumIoThreads: java.lang.Integer)
+    props.put(AsyncLogConfigs.BOOKKEEPER_CLIENT_LIMIT_STATS_LOGGING, bookkeeperClientLimitStatsLogging: java.lang.Boolean)
+    putIfNotNull(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS_NAME, bookkeeperClientAuthenticationParametersName)
   }
 }
