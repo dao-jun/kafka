@@ -3587,6 +3587,7 @@ project(':jmh-benchmarks') {
 
   shadowJar {
     archiveBaseName = 'kafka-jmh-benchmarks'
+    zip64 = true
   }
 
   dependencies {

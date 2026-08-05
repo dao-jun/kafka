@@ -16,6 +16,9 @@
  */
 package org.apache.kafka.common.config;
 
+import org.apache.kafka.common.annotation.InterfaceAudience;
+
+@InterfaceAudience.Public
 public class AsyncLogConfigs {
     public static final String LOG_ASYNC_MODE = "log.async.mode.enable";
 
