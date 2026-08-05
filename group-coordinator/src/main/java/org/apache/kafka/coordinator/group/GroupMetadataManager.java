@@ -8321,7 +8321,6 @@ public class GroupMetadataManager {
                     // when it gets invoked. if we have transitioned to another state, then do nothing
                     if (group.isInState(COMPLETING_REBALANCE) && request.generationId() == group.generationId()) {
                         if (t != null) {
-                            log.error("The future of [classicGroupSyncToClassicGroup] completed with error", t);
                             Errors error = appendGroupMetadataErrorToResponseError(Errors.forException(t));
                             resetAndPropagateAssignmentWithError(group, error);
                             maybePrepareRebalanceOrCompleteJoin(group, "Error " + error + " when storing group assignment" +

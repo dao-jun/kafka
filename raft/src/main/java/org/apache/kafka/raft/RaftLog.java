@@ -24,7 +24,6 @@ import org.apache.kafka.snapshot.RawSnapshotReader;
 import org.apache.kafka.snapshot.RawSnapshotWriter;
 
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 
 public interface RaftLog extends AutoCloseable {
 
@@ -40,14 +39,6 @@ public interface RaftLog extends AutoCloseable {
      * @throws RuntimeException if the batch base offset doesn't match the log end offset
      */
     LogAppendInfo appendAsLeader(Records records, int epoch);
-
-    default CompletableFuture<LogAppendInfo> appendAsyncLeaderAsync(Records records, int epoch) {
-        try {
-            return CompletableFuture.completedFuture(appendAsLeader(records, epoch));
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
-    }
 
     /**
      * Append a set of records that were replicated from the leader. The main
@@ -65,14 +56,6 @@ public interface RaftLog extends AutoCloseable {
      */
     LogAppendInfo appendAsFollower(Records records, int epoch);
 
-    default CompletableFuture<LogAppendInfo> appendAsyncFollowerAsync(Records records, int epoch) {
-        try {
-            return CompletableFuture.completedFuture(appendAsFollower(records, epoch));
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
-    }
-
     /**
      * Read a set of records from startOffsetInclusive. Always returns at least one records batch if one exists.
      *
@@ -83,15 +66,6 @@ public interface RaftLog extends AutoCloseable {
      */
     LogFetchInfo read(long startOffsetInclusive, Isolation isolation, int maxTotalBatchBytes);
 
-
-
-    default CompletableFuture<LogFetchInfo> readAsync(long startOffsetInclusive, Isolation isolation, int maxTotalBatchBytes) {
-        try {
-            return CompletableFuture.completedFuture(read(startOffsetInclusive, isolation, maxTotalBatchBytes));
-        } catch (Throwable t) {
-            return CompletableFuture.failedFuture(t);
-        }
-    }
 
     /**
      * Return the latest epoch. For an empty log, the latest epoch is defined

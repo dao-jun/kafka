@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.coordinator.common.runtime;
 
+import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime.CoordinatorState;
+
 import java.util.function.Supplier;
 
 /**
