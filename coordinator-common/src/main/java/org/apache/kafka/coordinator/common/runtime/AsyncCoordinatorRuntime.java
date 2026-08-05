@@ -1,0 +1,2672 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.coordinator.common.runtime;
+
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.errors.CoordinatorLoadInProgressException;
+import org.apache.kafka.common.errors.NotCoordinatorException;
+import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.record.internal.AbstractRecords;
+import org.apache.kafka.common.record.internal.CompressionType;
+import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.EndTransactionMarker;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
+import org.apache.kafka.common.record.internal.RecordBatch;
+import org.apache.kafka.common.record.internal.SimpleRecord;
+import org.apache.kafka.common.requests.TransactionResult;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.BufferSupplier;
+import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.deferred.DeferredEvent;
+import org.apache.kafka.deferred.DeferredEventQueue;
+import org.apache.kafka.server.common.TransactionVersion;
+import org.apache.kafka.server.util.timer.Timer;
+import org.apache.kafka.server.util.timer.TimerTask;
+import org.apache.kafka.storage.internals.log.VerificationGuard;
+import org.apache.kafka.timeline.SnapshotRegistry;
+
+import org.slf4j.Logger;
+
+import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static java.lang.Math.min;
+import static org.apache.kafka.coordinator.common.runtime.AsyncCoordinatorRuntime.AsyncCoordinatorWriteEvent.NOT_QUEUED;
+
+
+// Based on the last commit ID of trunk: 5f0e368255b6c3638a7502ea787eed17ca69cf18
+@SuppressWarnings("DuplicatedCode")
+public class AsyncCoordinatorRuntime<S extends CoordinatorShard<U>, U> implements ICoordinatorRuntime<S, U> {
+
+    /**
+     * Builder to create a CoordinatorRuntime.
+     *
+     * @param <S> The type of the state machine.
+     * @param <U> The type of the record.
+     */
+    public static class Builder<S extends CoordinatorShard<U>, U> {
+        private String logPrefix;
+        private LogContext logContext;
+        private CoordinatorEventProcessor eventProcessor;
+        private PartitionWriter partitionWriter;
+        private CoordinatorLoader<U> loader;
+        private CoordinatorShardBuilderSupplier<S, U> coordinatorShardBuilderSupplier;
+        private Time time = Time.SYSTEM;
+        private Timer timer;
+        private Duration writeTimeout;
+        private CoordinatorRuntimeMetrics runtimeMetrics;
+        private CoordinatorMetrics coordinatorMetrics;
+        private Serializer<U> serializer;
+        private Compression compression;
+        private OptionalInt appendLingerMs;
+        private ExecutorService executorService;
+        private Supplier<Integer> cachedBufferMaxBytesSupplier;
+
+        public Builder<S, U> withLogPrefix(String logPrefix) {
+            this.logPrefix = logPrefix;
+            return this;
+        }
+
+        public Builder<S, U> withLogContext(LogContext logContext) {
+            this.logContext = logContext;
+            return this;
+        }
+
+        public Builder<S, U> withEventProcessor(CoordinatorEventProcessor eventProcessor) {
+            this.eventProcessor = eventProcessor;
+            return this;
+        }
+
+        public Builder<S, U> withPartitionWriter(PartitionWriter partitionWriter) {
+            this.partitionWriter = partitionWriter;
+            return this;
+        }
+
+        public Builder<S, U> withLoader(CoordinatorLoader<U> loader) {
+            this.loader = loader;
+            return this;
+        }
+
+        public Builder<S, U> withCoordinatorShardBuilderSupplier(CoordinatorShardBuilderSupplier<S, U> coordinatorShardBuilderSupplier) {
+            this.coordinatorShardBuilderSupplier = coordinatorShardBuilderSupplier;
+            return this;
+        }
+
+        public Builder<S, U> withTime(Time time) {
+            this.time = time;
+            return this;
+        }
+
+        public Builder<S, U> withTimer(Timer timer) {
+            this.timer = timer;
+            return this;
+        }
+
+        public Builder<S, U> withWriteTimeout(Duration writeTimeout) {
+            this.writeTimeout = writeTimeout;
+            return this;
+        }
+
+        public Builder<S, U> withCoordinatorRuntimeMetrics(CoordinatorRuntimeMetrics runtimeMetrics) {
+            this.runtimeMetrics = runtimeMetrics;
+            return this;
+        }
+
+        public Builder<S, U> withCoordinatorMetrics(CoordinatorMetrics coordinatorMetrics) {
+            this.coordinatorMetrics = coordinatorMetrics;
+            return this;
+        }
+
+        public Builder<S, U> withSerializer(Serializer<U> serializer) {
+            this.serializer = serializer;
+            return this;
+        }
+
+        public Builder<S, U> withCompression(Compression compression) {
+            this.compression = compression;
+            return this;
+        }
+
+        public Builder<S, U> withAppendLingerMs(OptionalInt appendLingerMs) {
+            this.appendLingerMs = appendLingerMs;
+            return this;
+        }
+
+        public Builder<S, U> withExecutorService(ExecutorService executorService) {
+            this.executorService = executorService;
+            return this;
+        }
+
+        public Builder<S, U> withCachedBufferMaxBytesSupplier(Supplier<Integer> cachedBufferMaxBytesSupplier) {
+            this.cachedBufferMaxBytesSupplier = cachedBufferMaxBytesSupplier;
+            return this;
+        }
+
+        @SuppressWarnings("checkstyle:CyclomaticComplexity")
+        public AsyncCoordinatorRuntime<S, U> build() {
+            if (logPrefix == null)
+                logPrefix = "";
+            if (logContext == null)
+                logContext = new LogContext(logPrefix);
+            if (eventProcessor == null)
+                throw new IllegalArgumentException("Event processor must be set.");
+            if (partitionWriter == null)
+                throw new IllegalArgumentException("Partition write must be set.");
+            if (loader == null)
+                throw new IllegalArgumentException("Loader must be set.");
+            if (coordinatorShardBuilderSupplier == null)
+                throw new IllegalArgumentException("State machine supplier must be set.");
+            if (time == null)
+                throw new IllegalArgumentException("Time must be set.");
+            if (timer == null)
+                throw new IllegalArgumentException("Timer must be set.");
+            if (runtimeMetrics == null)
+                throw new IllegalArgumentException("CoordinatorRuntimeMetrics must be set.");
+            if (coordinatorMetrics == null)
+                throw new IllegalArgumentException("CoordinatorMetrics must be set.");
+            if (serializer == null)
+                throw new IllegalArgumentException("Serializer must be set.");
+            if (compression == null)
+                compression = Compression.NONE;
+            if (appendLingerMs == null)
+                appendLingerMs = OptionalInt.empty();
+            if (appendLingerMs.isPresent() && appendLingerMs.getAsInt() < 0)
+                throw new IllegalArgumentException("AppendLinger must be empty or >= 0");
+            if (executorService == null)
+                throw new IllegalArgumentException("ExecutorService must be set.");
+            if (cachedBufferMaxBytesSupplier == null)
+                throw new IllegalArgumentException("Cached buffer max bytes supplier must be set.");
+
+            return new AsyncCoordinatorRuntime<>(
+                    logPrefix,
+                    logContext,
+                    eventProcessor,
+                    partitionWriter,
+                    loader,
+                    coordinatorShardBuilderSupplier,
+                    time,
+                    timer,
+                    writeTimeout,
+                    runtimeMetrics,
+                    coordinatorMetrics,
+                    serializer,
+                    compression,
+                    appendLingerMs,
+                    executorService,
+                    cachedBufferMaxBytesSupplier
+            );
+        }
+    }
+
+    /**
+     * A container class to hold a record that needs to be replayed
+     * to the state machine after async write succeeds.
+     *
+     * @param <U> The record type.
+     */
+    private static class RecordToReplay<U> {
+        /**
+         * The offset of the record.
+         */
+        final long offset;
+
+        /**
+         * The producer ID associated with the record.
+         */
+        final long producerId;
+
+        /**
+         * The producer epoch associated with the record.
+         */
+        final short producerEpoch;
+
+        /**
+         * The deserialized record to replay to the state machine.
+         */
+        final U record;
+
+        /**
+         * The serialized simple record.
+         */
+        final SimpleRecord simpleRecord;
+
+        /**
+         * Whether this record should be replayed to the state machine.
+         */
+        final boolean shouldReplay;
+
+        RecordToReplay(
+                long offset,
+                long producerId,
+                short producerEpoch,
+                U record,
+                SimpleRecord simpleRecord,
+                boolean shouldReplay
+        ) {
+            this.offset = offset;
+            this.producerId = producerId;
+            this.producerEpoch = producerEpoch;
+            this.record = record;
+            this.simpleRecord = simpleRecord;
+            this.shouldReplay = shouldReplay;
+        }
+    }
+
+    /**
+     * A simple container class to hold all the attributes
+     * related to a pending batch.
+     *
+     * @param <U> The record type.
+     */
+    private static class AsyncCoordinatorBatch<U> {
+        /**
+         * The base (or first) offset of the batch. If the batch fails
+         * for any reason, the state machines is rolled back to it.
+         */
+        final long baseOffset;
+
+        /**
+         * The time at which the batch was created.
+         */
+        final long appendTimeMs;
+
+        /**
+         * The verification guard associated to the batch if it is
+         * transactional.
+         */
+        final VerificationGuard verificationGuard;
+
+        /**
+         * The byte buffer backing the records builder.
+         */
+        final ByteBuffer buffer;
+
+        /**
+         * The records builder.
+         */
+        final MemoryRecordsBuilder builder;
+
+        /**
+         * The timer used to enforce the append linger time if
+         * it is non-zero.
+         */
+        final Optional<TimerTask> lingerTimeoutTask;
+
+        /**
+         * The deferred events associated with the batch.
+         */
+        final DeferredEventCollection deferredEvents;
+
+        /**
+         * The next offset. This is updated when records
+         * are added to the batch.
+         */
+        long nextOffset;
+
+        /**
+         * The list of records to replay to the state machine
+         * after async write succeeds.
+         */
+        final List<RecordToReplay<U>> recordsToReplay;
+
+        AsyncCoordinatorBatch(
+                Logger log,
+                long baseOffset,
+                long appendTimeMs,
+                VerificationGuard verificationGuard,
+                ByteBuffer buffer,
+                MemoryRecordsBuilder builder,
+                Optional<TimerTask> lingerTimeoutTask
+        ) {
+            this.baseOffset = baseOffset;
+            this.nextOffset = baseOffset;
+            this.appendTimeMs = appendTimeMs;
+            this.verificationGuard = verificationGuard;
+            this.buffer = buffer;
+            this.builder = builder;
+            this.lingerTimeoutTask = lingerTimeoutTask;
+            this.deferredEvents = new DeferredEventCollection(log);
+            this.recordsToReplay = new ArrayList<>();
+        }
+    }
+
+    /**
+     * CoordinatorContext holds all the metadata around a coordinator state machine.
+     */
+    class AsyncCoordinatorContext {
+        /**
+         * The lock which protects all data in the context. Note that the context
+         * is never accessed concurrently, but it is accessed by multiple threads.
+         */
+        final ReentrantLock lock;
+
+        /**
+         * The topic partition backing the coordinator.
+         */
+        final TopicPartition tp;
+
+        /**
+         * The log context.
+         */
+        final LogContext logContext;
+
+        /**
+         * The deferred event queue used to park events waiting
+         * on records to be committed.
+         */
+        final DeferredEventQueue deferredEventQueue;
+
+        /**
+         * The coordinator timer.
+         */
+        final CoordinatorTimerImpl<U> timer;
+
+        /**
+         * The coordinator executor.
+         */
+        final CoordinatorExecutorImpl<U> executor;
+
+        /**
+         * The current state.
+         */
+        volatile CoordinatorState state;
+
+        /**
+         * The current epoch of the coordinator. This represents
+         * the epoch of the partition leader.
+         */
+        int epoch;
+
+        /**
+         * The state machine and the metadata that can be accessed by
+         * other threads.
+         */
+        SnapshottableCoordinator<S, U> coordinator;
+
+        /**
+         * The buffer supplier used to write records to the log.
+         */
+        BufferSupplier bufferSupplier;
+
+        /**
+         * The cached buffer size.
+         */
+        AtomicLong cachedBufferSize;
+
+        /**
+         * The current (or pending) batch.
+         */
+        AsyncCoordinatorBatch<U> currentBatch;
+
+        /**
+         * The batch currently being written asynchronously.
+         * Only one batch can be in-flight at a time.
+         */
+        AsyncCoordinatorBatch<U> inFlightBatch;
+
+        /**
+         * Flag to prevent concurrent async operations.
+         * True when an async write is in progress.
+         */
+        boolean asyncOperationInProgress;
+
+        /**
+         * The batch epoch. Incremented every time a new batch is started.
+         * Only valid for the lifetime of the CoordinatorContext. The first batch has an epoch of 1.
+         */
+        int batchEpoch;
+
+        /**
+         * Constructor.
+         *
+         * @param tp The topic partition of the coordinator.
+         */
+        private AsyncCoordinatorContext(
+                TopicPartition tp
+        ) {
+            this.lock = new ReentrantLock();
+            this.tp = tp;
+            this.logContext = new LogContext(String.format("[%s topic=%s partition=%d] ",
+                    logPrefix,
+                    tp.topic(),
+                    tp.partition()
+            ));
+            this.state = CoordinatorState.INITIAL;
+            this.epoch = -1;
+            this.deferredEventQueue = new DeferredEventQueue(logContext);
+            this.timer = new CoordinatorTimerImpl<>(
+                    logContext,
+                    AsyncCoordinatorRuntime.this.timer,
+                    (operationName, operation) -> {
+                        try {
+                            return scheduleWriteOperation(
+                                    operationName,
+                                    tp,
+                                    coordinator -> operation.generate()
+                            );
+                        } catch (Throwable t) {
+                            return CompletableFuture.failedFuture(t);
+                        }
+                    }
+            );
+            this.executor = new CoordinatorExecutorImpl<>(
+                    logContext,
+                    executorService,
+                    (operationName, operation) -> {
+                        try {
+                            return scheduleWriteOperation(
+                                    operationName,
+                                    tp,
+                                    coordinator -> operation.generate()
+                            );
+                        } catch (Throwable t) {
+                            return CompletableFuture.failedFuture(t);
+                        }
+                    }
+            );
+            this.bufferSupplier = new BufferSupplier.GrowableBufferSupplier();
+            this.cachedBufferSize = new AtomicLong(0);
+        }
+
+        /**
+         * Transitions to the new state.
+         *
+         * @param newState The new state.
+         */
+        private void transitionTo(
+                CoordinatorState newState
+        ) {
+            if (!newState.canTransitionFrom(state)) {
+                throw new IllegalStateException("Cannot transition from " + state + " to " + newState);
+            }
+            CoordinatorState oldState = state;
+
+            log.debug("Transition from {} to {}.", state, newState);
+            switch (newState) {
+                case LOADING:
+                    state = CoordinatorState.LOADING;
+                    SnapshotRegistry snapshotRegistry = new SnapshotRegistry(logContext);
+                    coordinator = new SnapshottableCoordinator<>(
+                            logContext,
+                            snapshotRegistry,
+                            coordinatorShardBuilderSupplier
+                                    .get()
+                                    .withLogContext(logContext)
+                                    .withSnapshotRegistry(snapshotRegistry)
+                                    .withTime(time)
+                                    .withTimer(timer)
+                                    .withExecutor(executor)
+                                    .withCoordinatorMetrics(coordinatorMetrics)
+                                    .withTopicPartition(tp)
+                                    .build(),
+                            tp
+                    );
+                    load();
+                    break;
+
+                case ACTIVE:
+                    state = CoordinatorState.ACTIVE;
+                    // DO NOT register HighWatermarkListener (we self-manage HWM)
+                    // Since appendAsync success means HWM is immediately updated,
+                    // we update lastCommittedOffset directly in async completion handlers.
+                    // highWatermarklistener = new HighWatermarkListener();
+                    // partitionWriter.registerListener(tp, highWatermarklistener);
+                    coordinator.onLoaded(metadataImage);
+                    break;
+
+                case FAILED:
+                    state = CoordinatorState.FAILED;
+                    unload();
+                    break;
+
+                case CLOSED:
+                    state = CoordinatorState.CLOSED;
+                    unload();
+                    break;
+
+                default:
+                    throw new IllegalArgumentException("Transitioning to " + newState + " is not supported.");
+            }
+
+            runtimeMetrics.recordPartitionStateChange(oldState, state);
+        }
+
+        /**
+         * Loads the coordinator.
+         */
+        private void load() {
+            if (state != CoordinatorState.LOADING) {
+                throw new IllegalStateException("Coordinator must be in loading state");
+            }
+
+            loader.load(tp, coordinator).whenComplete((summary, exception) -> {
+                scheduleInternalOperation("CompleteLoad(tp=" + tp + ", epoch=" + epoch + ")", tp, () -> {
+                    AsyncCoordinatorContext context = coordinators.get(tp);
+                    if (context != null)  {
+                        if (context.state != CoordinatorState.LOADING) {
+                            log.info("Ignored load completion from {} because context is in {} state.",
+                                    context.tp, context.state);
+                            return;
+                        }
+                        try {
+                            if (exception != null) throw exception;
+                            context.transitionTo(CoordinatorState.ACTIVE);
+                            if (summary != null) {
+                                runtimeMetrics.recordPartitionLoadSensor(summary.startTimeMs(), summary.endTimeMs());
+                                log.info("Finished loading of metadata from {} with epoch {} in {}ms where {}ms " +
+                                                "was spent in the scheduler. Loaded {} records which total to {} bytes.",
+                                        tp, epoch, summary.endTimeMs() - summary.startTimeMs(),
+                                        summary.schedulerQueueTimeMs(), summary.numRecords(), summary.numBytes());
+                            }
+                        } catch (Throwable ex) {
+                            log.error("Failed to load metadata from {} with epoch {} due to {}.",
+                                    tp, epoch, ex.getMessage(), ex);
+                            context.transitionTo(CoordinatorState.FAILED);
+                        }
+                    } else {
+                        log.debug("Failed to complete the loading of metadata for {} in epoch {} since the coordinator does not exist.",
+                                tp, epoch);
+                    }
+                });
+            });
+        }
+
+        /**
+         * Unloads the coordinator.
+         */
+        private void unload() {
+            // Note: We do NOT register/deregister HighWatermarkListener
+            // because we self-manage HWM updates in async completion handlers.
+
+            timer.cancelAll();
+            executor.cancelAll();
+            deferredEventQueue.failAll(Errors.NOT_COORDINATOR.exception());
+
+            // Clean up in-flight batch if exists
+            if (inFlightBatch != null) {
+                inFlightBatch.deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
+                freeInFlightBatch();
+            }
+
+            // Clean up current batch
+            failCurrentBatch(Errors.NOT_COORDINATOR.exception());
+
+            // Reset async operation flag
+            asyncOperationInProgress = false;
+
+            if (coordinator != null) {
+                try {
+                    coordinator.onUnloaded();
+                } catch (Throwable ex) {
+                    log.error("Failed to unload coordinator for {} due to {}.", tp, ex.getMessage(), ex);
+                }
+            }
+            coordinator = null;
+        }
+
+        /**
+         * Frees the current batch.
+         */
+        private void freeCurrentBatch() {
+            // Cancel the linger timeout.
+            currentBatch.lingerTimeoutTask.ifPresent(TimerTask::cancel);
+
+            // Release the buffer only if it is not larger than the cachedBufferMaxBytes.
+            int cachedBufferMaxBytes = cachedBufferMaxBytesSupplier.get();
+
+            if (currentBatch.builder.buffer().capacity() <= cachedBufferMaxBytes) {
+                bufferSupplier.release(currentBatch.builder.buffer());
+                cachedBufferSize.set(currentBatch.builder.buffer().capacity());
+            } else if (currentBatch.buffer.capacity() <= cachedBufferMaxBytes) {
+                bufferSupplier.release(currentBatch.buffer);
+                cachedBufferSize.set(currentBatch.buffer.capacity());
+                // If the builder expands the buffer beyond the cachedBufferMaxBytes, that should also increase the discard counter.
+                runtimeMetrics.recordBufferCacheDiscarded();
+            } else {
+                runtimeMetrics.recordBufferCacheDiscarded();
+                cachedBufferSize.set(0L);
+            }
+
+            currentBatch = null;
+        }
+
+        /**
+         * Frees the in-flight batch.
+         */
+        private void freeInFlightBatch() {
+            if (inFlightBatch != null) {
+                // Cancel the linger timeout.
+                inFlightBatch.lingerTimeoutTask.ifPresent(TimerTask::cancel);
+
+                // Release the buffer only if it is not larger than the cachedBufferMaxBytes.
+                int cachedBufferMaxBytes = cachedBufferMaxBytesSupplier.get();
+
+                if (inFlightBatch.builder.buffer().capacity() <= cachedBufferMaxBytes) {
+                    bufferSupplier.release(inFlightBatch.builder.buffer());
+                    cachedBufferSize.set(inFlightBatch.builder.buffer().capacity());
+                } else if (inFlightBatch.buffer.capacity() <= cachedBufferMaxBytes) {
+                    bufferSupplier.release(inFlightBatch.buffer);
+                    cachedBufferSize.set(inFlightBatch.buffer.capacity());
+                    // If the builder expands the buffer beyond the cachedBufferMaxBytes, that should also increase the discard counter.
+                    runtimeMetrics.recordBufferCacheDiscarded();
+                } else {
+                    runtimeMetrics.recordBufferCacheDiscarded();
+                    cachedBufferSize.set(0L);
+                }
+
+                inFlightBatch = null;
+            }
+        }
+
+        /**
+         * Adds a flush event to the end of the event queue, after any existing writes in the queue.
+         *
+         * @param expectedBatchEpoch The epoch of the batch to flush.
+         */
+        private void enqueueAdaptiveFlush(int expectedBatchEpoch) {
+            enqueueLast(new AsyncCoordinatorInternalEvent("FlushBatch", tp, () -> {
+                withActiveContextOrThrow(tp, context -> {
+                    // The batch could have already been flushed because it reached the maximum
+                    // batch size or a transactional write came in. When this happens, we want
+                    // to avoid flushing the next batch early.
+                    if (context.currentBatch != null && context.batchEpoch == expectedBatchEpoch) {
+                        context.flushCurrentBatch();
+                    }
+                });
+            }));
+        }
+
+        /**
+         * Flushes the current (or pending) batch to the log. When the batch is written
+         * locally, a new snapshot is created in the snapshot registry and the events
+         * associated with the batch are added to the deferred event queue.
+         */
+        private void flushCurrentBatch() {
+            if (currentBatch != null) {
+                try {
+                    if (currentBatch.builder.numRecords() == 0) {
+                        // The only way we can get here is if append() has failed in an unexpected
+                        // way and left an empty batch. Try to clean it up.
+                        log.debug("Tried to flush an empty batch for {}.", tp);
+                        // There should not be any deferred events attached to the batch. We fail
+                        // the batch just in case. As a side effect, coordinator state is also
+                        // reverted, but there should be no changes since the batch was empty.
+                        failCurrentBatch(new IllegalStateException("Record batch was empty"));
+                        return;
+                    }
+
+                    long flushStartMs = time.milliseconds();
+                    runtimeMetrics.recordLingerTime(flushStartMs - currentBatch.appendTimeMs);
+
+                    // Set async operation flag to prevent new batch allocation
+                    asyncOperationInProgress = true;
+
+                    // Move currentBatch to inFlightBatch
+                    inFlightBatch = currentBatch;
+                    currentBatch = null;
+
+                    // Write the records asynchronously to the log.
+                    // Regular coordinator records use TV_UNKNOWN since they're not transaction markers.
+                    CompletableFuture<Long> appendFuture = partitionWriter.appendAsync(
+                            tp,
+                            inFlightBatch.verificationGuard,
+                            inFlightBatch.builder.build(),
+                            TransactionVersion.TV_UNKNOWN
+                    );
+
+                    runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+
+                    // Capture the batch reference for the callback
+                    final AsyncCoordinatorBatch<U> batchToFlush = inFlightBatch;
+
+                    // Register async completion handler
+                    appendFuture.whenComplete((offset, ex) -> {
+                        if (ex != null) {
+                            log.error("Error happened while appending records.", ex);
+                        }
+                        try {
+                            enqueueLast(new AsyncCoordinatorInternalEvent(
+                                    "AsyncFlushCompletion",
+                                    tp,
+                                    () -> handleAsyncFlushCompletion(batchToFlush, offset, ex)
+                            ));
+                        } catch (RejectedExecutionException e) {
+                            // Event queue closed (coordinator shutting down)
+                            log.warn("Failed to enqueue async flush completion for {} due to: {}. " +
+                                    "Coordinator may be shutting down.", tp, e.getMessage());
+                            // Note: unload() will clean up inFlightBatch
+                        } catch (Throwable t) {
+                            log.error("Unexpected error in async flush completion callback for {}", tp, t);
+                        }
+                    });
+
+                } catch (Throwable t) {
+                    log.error("Starting async write to {} failed due to: {}.", tp, t.getMessage(), t);
+                    // Restore currentBatch from inFlightBatch if it was moved
+                    if (currentBatch == null && inFlightBatch != null) {
+                        currentBatch = inFlightBatch;
+                        inFlightBatch = null;
+                    }
+                    asyncOperationInProgress = false;
+                    failCurrentBatch(t);
+                    // We rethrow the exception for the caller to handle it too.
+                    throw t;
+                }
+            }
+        }
+
+        /**
+         * Flushes the current batch if it is transactional, if it has passed the append linger time, or if it is full.
+         */
+        private void maybeFlushCurrentBatch(long currentTimeMs) {
+            if (currentBatch != null) {
+                if (currentBatch.builder.isTransactional() ||
+                        // When adaptive linger time is enabled, we avoid flushing here.
+                        // Instead, we rely on the flush event enqueued at the back of the event queue.
+                        (appendLingerMs.isPresent() && (currentTimeMs - currentBatch.appendTimeMs) >= appendLingerMs.getAsInt()) ||
+                        !currentBatch.builder.hasRoomFor(0)) {
+                    flushCurrentBatch();
+                }
+            }
+        }
+
+        /**
+         * Handles the completion of an async flush operation.
+         * This method runs in the event queue (thread-safe).
+         *
+         * @param batch     The batch that was flushed.
+         * @param offset    The offset returned by the async write, or null if failed.
+         * @param throwable The exception if the async write failed, or null if succeeded.
+         */
+        private void handleAsyncFlushCompletion(
+                AsyncCoordinatorBatch<U> batch,
+                Long offset,
+                Throwable throwable
+        ) {
+            // This method runs in event queue (thread-safe)
+
+            if (throwable != null) {
+                // Async write failed
+                log.error("Async write to {} failed due to: {}.", tp, throwable.getMessage(), throwable);
+
+                // Fail all deferred events
+                batch.deferredEvents.complete(throwable);
+
+                // Clean up resources
+                freeInFlightBatch();
+                asyncOperationInProgress = false;
+
+                // Transition to FAILED if needed
+                if (shouldTransitionToFailed(throwable)) {
+                    transitionTo(CoordinatorState.FAILED);
+                    transitionTo(CoordinatorState.LOADING);
+                }
+
+                return;
+            }
+
+            // Async write succeeded
+            log.debug("Async write to {} completed successfully with offset {}.", tp, offset);
+
+            // Verify offset matches expectation
+            if (offset != batch.nextOffset) {
+                log.error("The state machine of the coordinator {} is out of sync with the underlying log. " +
+                                "The last written offset returned is {} while the coordinator expected {}. The coordinator " +
+                                "will be reloaded in order to re-synchronize the state machine.",
+                        tp, offset, batch.nextOffset);
+
+                // Fail events
+                batch.deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
+
+                // Clean up
+                freeInFlightBatch();
+                asyncOperationInProgress = false;
+
+                // Trigger reload
+                transitionTo(CoordinatorState.FAILED);
+                transitionTo(CoordinatorState.LOADING);
+
+                return;
+            }
+
+            // Check coordinator state
+            if (state != CoordinatorState.ACTIVE) {
+                log.warn("Coordinator {} is no longer active (state={}). Discarding async flush result.",
+                        tp, state);
+                batch.deferredEvents.complete(Errors.NOT_COORDINATOR.exception());
+                freeInFlightBatch();
+                // Don't clear asyncOperationInProgress here - the state transition (unload)
+                // should have already cleared it. Clearing it here can cause race conditions
+                // where new operations start before the coordinator is fully transitioned.
+                return;
+            }
+
+            try {
+                // NOW replay records to state machine
+                for (RecordToReplay<U> recordToReplay : batch.recordsToReplay) {
+                    if (recordToReplay.shouldReplay) {
+                        coordinator.replay(
+                                recordToReplay.offset,
+                                recordToReplay.producerId,
+                                recordToReplay.producerEpoch,
+                                recordToReplay.record
+                        );
+                    }
+                }
+
+                // Update lastWrittenOffset
+                coordinator.updateLastWrittenOffset(offset);
+
+                // Self-trigger HWM update
+                // Since appendAsync success means HWM is immediately updated,
+                // we can safely update lastCommittedOffset here
+                log.debug("Updating high watermark of {} to {} after async flush.", tp, offset);
+                coordinator.updateLastCommittedOffset(offset);
+                coordinatorMetrics.onUpdateLastCommittedOffset(tp, offset);
+
+                // Complete deferred events (add first, then complete)
+                deferredEventQueue.add(offset, batch.deferredEvents);
+                deferredEventQueue.completeUpTo(offset);
+            } catch (Throwable t) {
+                // Replay failed (very rare)
+                log.error("Replaying records to {} failed due to: {}.", tp, t.getMessage(), t);
+                batch.deferredEvents.complete(t);
+                freeInFlightBatch();
+                asyncOperationInProgress = false;
+                transitionTo(CoordinatorState.FAILED);
+                transitionTo(CoordinatorState.LOADING);
+                return;
+            }
+
+            // Success - clean up
+            freeInFlightBatch();
+            asyncOperationInProgress = false;
+
+            // Flush next batch if exists
+            if (currentBatch != null) {
+                maybeFlushCurrentBatch(time.milliseconds());
+            }
+        }
+
+        /**
+         * Determines if the coordinator should transition to FAILED state
+         * based on the exception type.
+         *
+         * @param t The exception to check.
+         * @return true if should transition to FAILED, false otherwise.
+         */
+        private boolean shouldTransitionToFailed(Throwable t) {
+            // Transition to FAILED for serious errors that require reload
+            // Don't transition for transient errors like timeouts
+            return !(t instanceof TimeoutException ||
+                    t instanceof RejectedExecutionException);
+        }
+
+        /**
+         * Fails the current batch, reverts to the snapshot to the base/start offset of the
+         * batch, fails all the associated events.
+         */
+        private void failCurrentBatch(Throwable t) {
+            if (currentBatch != null) {
+                coordinator.revertLastWrittenOffset(currentBatch.baseOffset);
+                currentBatch.deferredEvents.complete(t);
+                freeCurrentBatch();
+            }
+        }
+
+        /**
+         * Allocates a new batch if none already exists.
+         */
+        private void maybeAllocateNewBatch(
+                long producerId,
+                short producerEpoch,
+                VerificationGuard verificationGuard,
+                long currentTimeMs
+        ) {
+            // Cannot allocate new batch while async operation in progress.
+            // This ensures strict sequential ordering - only one batch in-flight at a time.
+            if (asyncOperationInProgress) {
+                return;
+            }
+
+            if (currentBatch == null) {
+                int maxBatchSize = partitionWriter.config(tp).maxMessageSize();
+                long prevLastWrittenOffset = coordinator.lastWrittenOffset();
+                ByteBuffer buffer = bufferSupplier.get(min(INITIAL_BUFFER_SIZE, maxBatchSize));
+
+                MemoryRecordsBuilder builder = new MemoryRecordsBuilder(
+                        buffer,
+                        RecordBatch.CURRENT_MAGIC_VALUE,
+                        compression,
+                        TimestampType.CREATE_TIME,
+                        0L,
+                        currentTimeMs,
+                        producerId,
+                        producerEpoch,
+                        0,
+                        producerId != RecordBatch.NO_PRODUCER_ID,
+                        false,
+                        RecordBatch.NO_PARTITION_LEADER_EPOCH,
+                        maxBatchSize
+                );
+
+                batchEpoch++;
+
+                Optional<TimerTask> lingerTimeoutTask = Optional.empty();
+                if (appendLingerMs.isPresent()) {
+                    if (appendLingerMs.getAsInt() > 0) {
+                        lingerTimeoutTask = Optional.of(new TimerTask(appendLingerMs.getAsInt()) {
+                            @Override
+                            public void run() {
+                                // An event to flush the batch is pushed to the front of the queue
+                                // to ensure that the linger time is respected.
+                                enqueueFirst(new AsyncCoordinatorInternalEvent("FlushBatch", tp, () -> {
+                                    if (this.isCancelled()) return;
+                                    withActiveContextOrThrow(tp, AsyncCoordinatorContext::flushCurrentBatch);
+                                }));
+                            }
+                        });
+                        AsyncCoordinatorRuntime.this.timer.add(lingerTimeoutTask.get());
+                    }
+                } else {
+                    // Always queue a flush immediately at the end of the queue, unless the batch is
+                    // transactional. Transactional batches are flushed immediately at the end of
+                    // the write, so a flush event is never needed.
+                    if (!builder.isTransactional()) {
+                        enqueueAdaptiveFlush(batchEpoch);
+                    }
+                }
+
+                currentBatch = new AsyncCoordinatorBatch<>(
+                        log,
+                        prevLastWrittenOffset,
+                        currentTimeMs,
+                        verificationGuard,
+                        buffer,
+                        builder,
+                        lingerTimeoutTask
+                );
+            }
+        }
+
+        /**
+         * Completes the given event once all pending writes are completed.
+         *
+         * @param event             The event to complete once all pending
+         *                          writes are completed.
+         */
+        private void waitForPendingWrites(DeferredEvent event) {
+            if (currentBatch != null && currentBatch.builder.numRecords() > 0) {
+                currentBatch.deferredEvents.add(event);
+            } else {
+                if (coordinator.lastCommittedOffset() < coordinator.lastWrittenOffset()) {
+                    deferredEventQueue.add(coordinator.lastWrittenOffset(), DeferredEventCollection.of(log, event));
+                } else {
+                    event.complete(null);
+                }
+            }
+        }
+
+        /**
+         * Appends records to the log and replay them to the state machine.
+         *
+         * @param producerId        The producer id.
+         * @param producerEpoch     The producer epoch.
+         * @param verificationGuard The verification guard.
+         * @param records           The records to append.
+         * @param replay            A boolean indicating whether the records
+         *                          must be replayed or not.
+         * @param isAtomic          A boolean indicating whether the records
+         *                          must be written atomically or not.
+         * @param event             The event that must be completed when the
+         *                          records are written.
+         */
+        private void append(
+                long producerId,
+                short producerEpoch,
+                VerificationGuard verificationGuard,
+                List<U> records,
+                boolean replay,
+                boolean isAtomic,
+                DeferredEvent event
+        ) {
+            if (state != CoordinatorState.ACTIVE) {
+                throw new IllegalStateException("Coordinator must be active to append records");
+            }
+
+            if (records.isEmpty()) {
+                // If the records are empty, it was a read operation after all. In this case,
+                // the response can be returned once any pending write operations complete.
+                waitForPendingWrites(event);
+            } else {
+                // If the records are not empty, first, they are applied to the state machine,
+                // second, they are appended to the opened batch.
+                long currentTimeMs = time.milliseconds();
+
+                // If the current write operation is transactional, the current batch
+                // is written before proceeding with it.
+                if (producerId != RecordBatch.NO_PRODUCER_ID) {
+                    isAtomic = true;
+                    // If flushing fails, we don't catch the exception in order to let
+                    // the caller fail the current operation.
+                    flushCurrentBatch();
+                }
+
+                // Allocate a new batch if none exists.
+                maybeAllocateNewBatch(
+                        producerId,
+                        producerEpoch,
+                        verificationGuard,
+                        currentTimeMs
+                );
+
+                // Prepare the records.
+                List<SimpleRecord> recordsToAppend = new ArrayList<>(records.size());
+                for (U record : records) {
+                    recordsToAppend.add(new SimpleRecord(
+                            currentTimeMs,
+                            serializer.serializeKey(record),
+                            serializer.serializeValue(record)
+                    ));
+                }
+
+                if (isAtomic) {
+                    // Verify that a batch is available for atomic writes.
+                    // This can fail if an async operation is in progress or if the coordinator
+                    // transitioned to a non-ACTIVE state during batch allocation.
+                    if (currentBatch == null) {
+                        throw new IllegalStateException("Cannot perform atomic write for coordinator " + tp +
+                                " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                    }
+
+                    // Compute the size of the records.
+                    int estimatedSizeUpperBound = AbstractRecords.estimateSizeInBytes(
+                            currentBatch.builder.magic(),
+                            CompressionType.NONE,
+                            recordsToAppend
+                    );
+
+                    if (!currentBatch.builder.hasRoomFor(estimatedSizeUpperBound)) {
+                        // Start a new batch when the total uncompressed data size would exceed
+                        // the max batch size. We still allow atomic writes with an uncompressed size
+                        // larger than the max batch size as long as they compress down to under the max
+                        // batch size. These large writes go into a batch by themselves.
+                        flushCurrentBatch();
+                        maybeAllocateNewBatch(
+                                producerId,
+                                producerEpoch,
+                                verificationGuard,
+                                currentTimeMs
+                        );
+
+                        // Verify that batch allocation succeeded after flush.
+                        if (currentBatch == null) {
+                            throw new IllegalStateException("Cannot allocate new batch for atomic write for coordinator " + tp +
+                                    " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                        }
+                    }
+                }
+
+
+                for (int i = 0; i < records.size(); i++) {
+                    U recordToReplay = records.get(i);
+                    SimpleRecord recordToAppend = recordsToAppend.get(i);
+
+                    if (!isAtomic) {
+                        // Verify that a batch is available for non-atomic writes.
+                        // This can fail if an async operation is in progress or if the coordinator
+                        // transitioned to a non-ACTIVE state during batch allocation.
+                        if (currentBatch == null) {
+                            throw new IllegalStateException("Cannot perform write for coordinator " + tp +
+                                    " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                        }
+
+                        // Check if the current batch has enough space. We check this before
+                        // replaying the record in order to avoid having to revert back
+                        // changes if the record do not fit within a batch.
+                        boolean hasRoomFor = currentBatch.builder.hasRoomFor(
+                                recordToAppend.timestamp(),
+                                recordToAppend.key(),
+                                recordToAppend.value(),
+                                recordToAppend.headers()
+                        );
+
+                        if (!hasRoomFor) {
+                            // If flushing fails, we don't catch the exception in order to let
+                            // the caller fail the current operation.
+                            flushCurrentBatch();
+                            maybeAllocateNewBatch(
+                                    producerId,
+                                    producerEpoch,
+                                    verificationGuard,
+                                    currentTimeMs
+                            );
+
+                            // Verify that batch allocation succeeded after flush.
+                            if (currentBatch == null) {
+                                throw new IllegalStateException("Cannot allocate new batch for coordinator " + tp +
+                                        " in state " + state + " (asyncOperationInProgress=" + asyncOperationInProgress + ")");
+                            }
+                        }
+                    }
+
+                    try {
+                        // Store record for later replay after async write succeeds.
+                        // This implements the "write-then-replay" pattern for READ COMMITTED semantics.
+                        RecordToReplay<U> recordToReplayLater = new RecordToReplay<>(
+                                currentBatch.nextOffset,
+                                producerId,
+                                producerEpoch,
+                                recordToReplay,
+                                recordToAppend,
+                                replay  // Only replay if requested
+                        );
+                        currentBatch.recordsToReplay.add(recordToReplayLater);
+
+                        currentBatch.builder.append(recordToAppend);
+                        currentBatch.nextOffset++;
+                    } catch (Throwable t) {
+                        log.error("Appending record {} to {} failed due to: {}.", recordToReplay, tp, t.getMessage(), t);
+                        // Add the event to the list of pending events associated with the last
+                        // batch in order to fail it too.
+                        currentBatch.deferredEvents.add(event);
+                        // If an exception is thrown, we fail the entire batch. Exceptions should be
+                        // really exceptional in this code path and they would usually be the results
+                        // of bugs preventing records to be appended.
+                        failCurrentBatch(t);
+                        return;
+                    }
+                }
+                // Add the event to the list of pending events associated with the batch.
+                currentBatch.deferredEvents.add(event);
+                // Write the current batch if it is transactional, if the linger timeout
+                // has expired, or if it is full.
+                // If flushing fails, we don't catch the exception in order to let
+                // the caller fail the current operation.
+                maybeFlushCurrentBatch(currentTimeMs);
+            }
+        }
+
+        /**
+         * Completes a transaction.
+         *
+         * @param producerId        The producer id.
+         * @param producerEpoch     The producer epoch.
+         * @param coordinatorEpoch  The coordinator epoch of the transaction coordinator.
+         * @param result            The transaction result.
+         * @param transactionVersion The transaction version (1 = TV1, 2 = TV2, etc.).
+         * @param event             The event that must be completed when the
+         *                          control record is written.
+         */
+        private void completeTransaction(
+                long producerId,
+                short producerEpoch,
+                int coordinatorEpoch,
+                TransactionResult result,
+                short transactionVersion,
+                DeferredEvent event
+        ) {
+            if (state != CoordinatorState.ACTIVE) {
+                throw new IllegalStateException("Coordinator must be active to complete a transaction");
+            }
+
+            // The current batch must be written before the transaction marker is written
+            // in order to respect the order.
+            flushCurrentBatch();
+
+            long prevLastWrittenOffset = coordinator.lastWrittenOffset();
+            try {
+                // Set async operation flag to prevent new batch allocation
+                asyncOperationInProgress = true;
+
+                long flushStartMs = time.milliseconds();
+
+                // Write transaction marker asynchronously
+                CompletableFuture<Long> appendFuture = partitionWriter.appendAsync(
+                        tp,
+                        VerificationGuard.SENTINEL,
+                        MemoryRecords.withEndTransactionMarker(
+                                time.milliseconds(),
+                                producerId,
+                                producerEpoch,
+                                new EndTransactionMarker(
+                                        result == TransactionResult.COMMIT ? ControlRecordType.COMMIT : ControlRecordType.ABORT,
+                                        coordinatorEpoch
+                                )
+                        ),
+                        transactionVersion
+                );
+
+                runtimeMetrics.recordFlushTime(time.milliseconds() - flushStartMs);
+
+                // Register async completion handler
+                appendFuture.whenComplete((offset, ex) -> {
+                    if (ex != null) {
+                        log.error("Error happened when append CompleteTransaction records", ex);
+                    }
+                    try {
+                        enqueueLast(new AsyncCoordinatorInternalEvent(
+                                "TransactionMarkerCompletion",
+                                tp,
+                                () -> handleTransactionMarkerCompletion(
+                                        producerId, producerEpoch, result, offset, ex, event, prevLastWrittenOffset
+                                )
+                        ));
+                    } catch (RejectedExecutionException e) {
+                        log.warn("Failed to enqueue transaction marker completion for {}", tp, e);
+                    } catch (Throwable t) {
+                        log.error("Unexpected error in transaction marker completion callback for {}", tp, t);
+                    }
+                });
+
+            } catch (Throwable t) {
+                asyncOperationInProgress = false;
+                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                event.complete(t);
+                throw t;
+            }
+        }
+
+        /**
+         * Handles the completion of an async transaction marker write.
+         * This method runs in the event queue (thread-safe).
+         *
+         * @param producerId            The producer id.
+         * @param producerEpoch         The producer epoch.
+         * @param result                The transaction result.
+         * @param offset                The offset returned by the async write, or null if failed.
+         * @param throwable             The exception if the async write failed, or null if succeeded.
+         * @param event                 The deferred event to complete.
+         * @param prevLastWrittenOffset The previous last written offset before the transaction.
+         */
+        private void handleTransactionMarkerCompletion(
+                long producerId,
+                short producerEpoch,
+                TransactionResult result,
+                Long offset,
+                Throwable throwable,
+                DeferredEvent event,
+                long prevLastWrittenOffset
+        ) {
+            if (throwable != null) {
+                // Async write failed
+                log.error("Async transaction marker write to {} failed due to: {}.", tp, throwable.getMessage(), throwable);
+                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                event.complete(throwable);
+                asyncOperationInProgress = false;
+                // Transition to FAILED if needed
+                if (shouldTransitionToFailed(throwable)) {
+                    transitionTo(CoordinatorState.FAILED);
+                    transitionTo(CoordinatorState.LOADING);
+                }
+                return;
+            }
+
+            // Async write succeeded
+            log.debug("Async transaction marker write to {} completed successfully with offset {}.", tp, offset);
+
+            // Check coordinator state
+            if (state != CoordinatorState.ACTIVE) {
+                log.warn("Coordinator {} is no longer active (state={}). Discarding transaction marker result.",
+                        tp, state);
+                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                event.complete(Errors.NOT_COORDINATOR.exception());
+                // Don't clear asyncOperationInProgress here - the state transition (unload)
+                // should have already cleared it. Clearing it here can cause race conditions
+                // where new operations start before the coordinator is fully transitioned.
+                return;
+            }
+
+            try {
+                // NOW replay transaction marker to state machine
+                coordinator.replayEndTransactionMarker(
+                        producerId,
+                        producerEpoch,
+                        result
+                );
+
+                // Update lastWrittenOffset
+                coordinator.updateLastWrittenOffset(offset);
+
+                // Self-trigger HWM update
+                log.debug("Updating high watermark of {} to {} after transaction marker.", tp, offset);
+                coordinator.updateLastCommittedOffset(offset);
+                coordinatorMetrics.onUpdateLastCommittedOffset(tp, offset);
+
+                // Complete deferred event
+                deferredEventQueue.add(offset, DeferredEventCollection.of(log, event));
+                deferredEventQueue.completeUpTo(offset);
+
+            } catch (Throwable t) {
+                // Replay failed (very rare)
+                log.error("Replaying transaction marker to {} failed due to: {}.", tp, t.getMessage(), t);
+                coordinator.revertLastWrittenOffset(prevLastWrittenOffset);
+                event.complete(t);
+                asyncOperationInProgress = false;
+                transitionTo(CoordinatorState.FAILED);
+                transitionTo(CoordinatorState.LOADING);
+                return;
+            }
+            // Success - clean up
+            asyncOperationInProgress = false;
+            // Flush next batch if exists
+            if (currentBatch != null) {
+                maybeFlushCurrentBatch(time.milliseconds());
+            }
+        }
+    }
+
+    class AsyncOperationTimeout extends TimerTask {
+        private final TopicPartition tp;
+        private final DeferredEvent event;
+
+        public AsyncOperationTimeout(
+                TopicPartition tp,
+                DeferredEvent event,
+                long delayMs
+        ) {
+            super(delayMs);
+            this.event = event;
+            this.tp = tp;
+        }
+
+        @Override
+        public void run() {
+            String name = event.toString();
+            scheduleInternalOperation("OperationTimeout(name=" + name + ", tp=" + tp + ")", tp,
+                    () -> event.complete(new TimeoutException(name + " timed out after " + delayMs + "ms")));
+        }
+    }
+
+    /**
+     * A coordinator event that modifies the coordinator state.
+     *
+     * @param <T> The type of the response.
+     */
+    class AsyncCoordinatorWriteEvent<T> implements CoordinatorEvent, DeferredEvent {
+
+        /**
+         * Indicates that the event was not appended to the deferred event queue.
+         */
+        public static final long NOT_QUEUED = -1L;
+
+        /**
+         * The topic partition that this write event is applied to.
+         */
+        final TopicPartition tp;
+
+        /**
+         * The operation name.
+         */
+        final String name;
+
+        /**
+         * The transactional id.
+         */
+        final String transactionalId;
+
+        /**
+         * The producer id.
+         */
+        final long producerId;
+
+        /**
+         * The producer epoch.
+         */
+        final short producerEpoch;
+
+        /**
+         * The verification guard.
+         */
+        final VerificationGuard verificationGuard;
+
+        /**
+         * The write operation to execute.
+         */
+        final CoordinatorWriteOperation<S, T, U> op;
+
+        /**
+         * The future that will be completed with the response
+         * generated by the write operation or an error.
+         */
+        final CompletableFuture<T> future;
+
+        /**
+         * Timeout value for the write operation.
+         */
+        final Duration writeTimeout;
+
+        /**
+         * The operation timeout.
+         */
+        private AsyncOperationTimeout operationTimeout = null;
+
+        /**
+         * The result of the write operation. It could be null
+         * if an exception is thrown before it is assigned.
+         */
+        CoordinatorResult<T, U> result;
+
+        /**
+         * The time this event was created.
+         */
+        private final long createdTimeMs;
+
+        /**
+         * The time the event was added to the deferred queue.
+         */
+        private long deferredEventQueuedTimestamp;
+
+        /**
+         * Constructor.
+         *
+         * @param name                  The operation name.
+         * @param tp                    The topic partition that the operation is applied to.
+         * @param writeTimeout          The write operation timeout
+         * @param op                    The write operation.
+         */
+        AsyncCoordinatorWriteEvent(
+                String name,
+                TopicPartition tp,
+                Duration writeTimeout,
+                CoordinatorWriteOperation<S, T, U> op
+        ) {
+            this(
+                    name,
+                    tp,
+                    null,
+                    RecordBatch.NO_PRODUCER_ID,
+                    RecordBatch.NO_PRODUCER_EPOCH,
+                    VerificationGuard.SENTINEL,
+                    writeTimeout,
+                    op
+            );
+        }
+
+        /**
+         * Constructor.
+         *
+         * @param name                      The operation name.
+         * @param tp                        The topic partition that the operation is applied to.
+         * @param transactionalId           The transactional id.
+         * @param producerId                The producer id.
+         * @param producerEpoch             The producer epoch.
+         * @param verificationGuard         The verification guard.
+         * @param writeTimeout              The write operation timeout
+         * @param op                        The write operation.
+         */
+        AsyncCoordinatorWriteEvent(
+                String name,
+                TopicPartition tp,
+                String transactionalId,
+                long producerId,
+                short producerEpoch,
+                VerificationGuard verificationGuard,
+                Duration writeTimeout,
+                CoordinatorWriteOperation<S, T, U> op
+        ) {
+            this.tp = tp;
+            this.name = name;
+            this.op = op;
+            this.transactionalId = transactionalId;
+            this.producerId = producerId;
+            this.producerEpoch = producerEpoch;
+            this.verificationGuard = verificationGuard;
+            this.future = new CompletableFuture<>();
+            this.createdTimeMs = time.milliseconds();
+            this.writeTimeout = writeTimeout;
+            this.deferredEventQueuedTimestamp = NOT_QUEUED;
+        }
+
+        /**
+         * @return The key used by the CoordinatorEventProcessor to ensure
+         * that events with the same key are not processed concurrently.
+         */
+        @Override
+        public TopicPartition key() {
+            return tp;
+        }
+
+        /**
+         * Called by the CoordinatorEventProcessor when the event is executed.
+         */
+        @Override
+        public void run() {
+            try {
+                // Get the context of the coordinator or fail if the coordinator is not in active state.
+                withActiveContextOrThrow(tp, context -> {
+                    // Execute the operation.
+                    result = op.generateRecordsAndResult(context.coordinator.coordinator());
+
+                    // Append the records and replay them to the state machine.
+                    context.append(
+                            producerId,
+                            producerEpoch,
+                            verificationGuard,
+                            result.records(),
+                            result.replayRecords(),
+                            result.isAtomic(),
+                            this
+                    );
+
+                    // If the operation is not done, create an operation timeout.
+                    if (!future.isDone()) {
+                        operationTimeout = new AsyncOperationTimeout(tp, this, writeTimeout.toMillis());
+                        timer.add(operationTimeout);
+
+                        // Only update when this event was appended to the deferred queue.
+                        deferredEventQueuedTimestamp = time.milliseconds();
+                    }
+                });
+            } catch (Throwable t) {
+                complete(t);
+            }
+        }
+
+        /**
+         * Completes the future with either the result of the write operation
+         * or the provided exception.
+         *
+         * @param exception The exception to complete the future with.
+         */
+        @Override
+        public void complete(Throwable exception) {
+            if (future.isDone()) {
+                return;
+            }
+
+            final long purgatoryTimeMs = time.milliseconds() - deferredEventQueuedTimestamp;
+            CompletableFuture<Void> appendFuture = result != null ? result.appendFuture() : null;
+
+            if (exception == null) {
+                if (appendFuture != null) result.appendFuture().complete(null);
+                future.complete(result.response());
+            } else {
+                if (appendFuture != null) result.appendFuture().completeExceptionally(exception);
+                future.completeExceptionally(exception);
+            }
+
+            if (operationTimeout != null) {
+                operationTimeout.cancel();
+                operationTimeout = null;
+            }
+
+            if (deferredEventQueuedTimestamp != NOT_QUEUED) {
+                // Only record the purgatory time if the event was deferred.
+                runtimeMetrics.recordEventPurgatoryTime(purgatoryTimeMs);
+            }
+        }
+
+        @Override
+        public long createdTimeMs() {
+            return this.createdTimeMs;
+        }
+
+        @Override
+        public String toString() {
+            return "CoordinatorWriteEvent(name=" + name + ")";
+        }
+    }
+
+    /**
+     * A coordinator that reads the committed coordinator state.
+     *
+     * @param <T> The type of the response.
+     */
+    class AsyncCoordinatorReadEvent<T> implements CoordinatorEvent {
+        /**
+         * The topic partition that this read event is applied to.
+         */
+        final TopicPartition tp;
+
+        /**
+         * The operation name.
+         */
+        final String name;
+
+        /**
+         * The read operation to execute.
+         */
+        final CoordinatorReadOperation<S, T> op;
+
+        /**
+         * The future that will be completed with the response
+         * generated by the read operation or an error.
+         */
+        final CompletableFuture<T> future;
+
+        /**
+         * The result of the read operation. It could be null
+         * if an exception is thrown before it is assigned.
+         */
+        T response;
+
+        /**
+         * The time this event was created.
+         */
+        private final long createdTimeMs;
+
+        /**
+         * Constructor.
+         *
+         * @param name  The operation name.
+         * @param tp    The topic partition that the operation is applied to.
+         * @param op    The read operation.
+         */
+        AsyncCoordinatorReadEvent(
+                String name,
+                TopicPartition tp,
+                CoordinatorReadOperation<S, T> op
+        ) {
+            this.tp = tp;
+            this.name = name;
+            this.op = op;
+            this.future = new CompletableFuture<>();
+            this.createdTimeMs = time.milliseconds();
+        }
+
+        /**
+         * @return The key used by the CoordinatorEventProcessor to ensure
+         * that events with the same key are not processed concurrently.
+         */
+        @Override
+        public TopicPartition key() {
+            return tp;
+        }
+
+        /**
+         * Called by the CoordinatorEventProcessor when the event is executed.
+         */
+        @Override
+        public void run() {
+            try {
+                // Get the context of the coordinator or fail if the coordinator is not in active state.
+                withActiveContextOrThrow(tp, context -> {
+                    // Execute the read operation.
+                    response = op.generateResponse(
+                            context.coordinator.coordinator(),
+                            context.coordinator.lastCommittedOffset()
+                    );
+
+                    // The response can be completed immediately.
+                    complete(null);
+                });
+            } catch (Throwable t) {
+                complete(t);
+            }
+        }
+
+        /**
+         * Completes the future with either the result of the read operation
+         * or the provided exception.
+         *
+         * @param exception The exception to complete the future with.
+         */
+        @Override
+        public void complete(Throwable exception) {
+            if (exception == null) {
+                future.complete(response);
+            } else {
+                future.completeExceptionally(exception);
+            }
+        }
+
+        @Override
+        public long createdTimeMs() {
+            return this.createdTimeMs;
+        }
+
+        @Override
+        public String toString() {
+            return "CoordinatorReadEvent(name=" + name + ")";
+        }
+    }
+
+    /**
+     * A coordinator event that applies and writes a transaction end marker.
+     */
+    class AsyncCoordinatorCompleteTransactionEvent implements CoordinatorEvent, DeferredEvent {
+        /**
+         * The topic partition that this write event is applied to.
+         */
+        final TopicPartition tp;
+
+        /**
+         * The operation name.
+         */
+        final String name;
+
+        /**
+         * The producer id.
+         */
+        final long producerId;
+
+        /**
+         * The producer epoch.
+         */
+        final short producerEpoch;
+
+        /**
+         * The coordinator epoch of the transaction coordinator.
+         */
+        final int coordinatorEpoch;
+
+        /**
+         * The transaction result.
+         */
+        final TransactionResult result;
+
+        /**
+         * The transaction version (1 = TV1, 2 = TV2 etc.).
+         */
+        final short transactionVersion;
+
+        /**
+         * Timeout value for the write operation.
+         */
+        final Duration writeTimeout;
+
+        /**
+         * The operation timeout.
+         */
+        private AsyncOperationTimeout operationTimeout = null;
+
+        /**
+         * The future that will be completed with the response
+         * generated by the write operation or an error.
+         */
+        final CompletableFuture<Void> future;
+
+        /**
+         * The time this event was created.
+         */
+        private final long createdTimeMs;
+
+        /**
+         * The time the records were appended to the log.
+         */
+        private long deferredEventQueuedTimestamp;
+
+        AsyncCoordinatorCompleteTransactionEvent(
+                String name,
+                TopicPartition tp,
+                long producerId,
+                short producerEpoch,
+                int coordinatorEpoch,
+                TransactionResult result,
+                short transactionVersion,
+                Duration writeTimeout
+        ) {
+            this.name = name;
+            this.tp = tp;
+            this.producerId = producerId;
+            this.producerEpoch = producerEpoch;
+            this.result = result;
+            this.coordinatorEpoch = coordinatorEpoch;
+            this.transactionVersion = transactionVersion;
+            this.writeTimeout = writeTimeout;
+            this.future = new CompletableFuture<>();
+            this.createdTimeMs = time.milliseconds();
+            this.deferredEventQueuedTimestamp = NOT_QUEUED;
+        }
+
+        /**
+         * @return The key used by the CoordinatorEventProcessor to ensure
+         * that events with the same key are not processed concurrently.
+         */
+        @Override
+        public TopicPartition key() {
+            return tp;
+        }
+
+        /**
+         * Called by the CoordinatorEventProcessor when the event is executed.
+         */
+        @Override
+        public void run() {
+            try {
+                withActiveContextOrThrow(tp, context -> {
+                    context.completeTransaction(
+                            producerId,
+                            producerEpoch,
+                            coordinatorEpoch,
+                            result,
+                            transactionVersion,
+                            this
+                    );
+
+                    if (!future.isDone()) {
+                        operationTimeout = new AsyncOperationTimeout(tp, this, writeTimeout.toMillis());
+                        timer.add(operationTimeout);
+
+                        // Only update when this event was appended to the deferred queue.
+                        deferredEventQueuedTimestamp = time.milliseconds();
+                    }
+                });
+            } catch (Throwable t) {
+                complete(t);
+            }
+        }
+
+        /**
+         * Completes the future with either the result of the write operation
+         * or the provided exception.
+         *
+         * @param exception The exception to complete the future with.
+         */
+        @Override
+        public void complete(Throwable exception) {
+            if (future.isDone()) {
+                return;
+            }
+
+            final long purgatoryTimeMs = time.milliseconds() - deferredEventQueuedTimestamp;
+            if (exception == null) {
+                future.complete(null);
+            } else {
+                future.completeExceptionally(exception);
+            }
+
+            if (operationTimeout != null) {
+                operationTimeout.cancel();
+                operationTimeout = null;
+            }
+
+            if (deferredEventQueuedTimestamp != NOT_QUEUED) {
+                // Only record the purgatory time if the event was deferred.
+                runtimeMetrics.recordEventPurgatoryTime(purgatoryTimeMs);
+            }
+        }
+
+        @Override
+        public long createdTimeMs() {
+            return createdTimeMs;
+        }
+
+        @Override
+        public String toString() {
+            return "CoordinatorCompleteTransactionEvent(name=" + name + ")";
+        }
+    }
+
+    /**
+     * A coordinator internal event.
+     */
+    class AsyncCoordinatorInternalEvent implements CoordinatorEvent {
+        /**
+         * The topic partition that this internal event is applied to.
+         */
+        final TopicPartition tp;
+
+        /**
+         * The operation name.
+         */
+        final String name;
+
+        /**
+         * The internal operation to execute.
+         */
+        final Runnable op;
+
+        /**
+         * The time this event was created.
+         */
+        private final long createdTimeMs;
+
+        /**
+         * Constructor.
+         *
+         * @param name  The operation name.
+         * @param tp    The topic partition that the operation is applied to.
+         * @param op    The operation.
+         */
+        AsyncCoordinatorInternalEvent(
+                String name,
+                TopicPartition tp,
+                Runnable op
+        ) {
+            this.tp = tp;
+            this.name = name;
+            this.op = op;
+            this.createdTimeMs = time.milliseconds();
+        }
+
+        /**
+         * @return The key used by the CoordinatorEventProcessor to ensure
+         * that events with the same key are not processed concurrently.
+         */
+        @Override
+        public TopicPartition key() {
+            return tp;
+        }
+
+        /**
+         * Called by the CoordinatorEventProcessor when the event is executed.
+         */
+        @Override
+        public void run() {
+            try {
+                op.run();
+            } catch (Throwable t) {
+                complete(t);
+            }
+        }
+
+        /**
+         * Logs any exceptions thrown while the event is executed.
+         *
+         * @param exception The exception.
+         */
+        @Override
+        public void complete(Throwable exception) {
+            if (exception != null) {
+                log.error("Execution of {} failed due to {}.", name, exception.getMessage(), exception);
+            }
+        }
+
+        @Override
+        public long createdTimeMs() {
+            return this.createdTimeMs;
+        }
+
+        @Override
+        public String toString() {
+            return "InternalEvent(name=" + name + ")";
+        }
+    }
+
+    /**
+     * 512KB. Used for initial buffer size for write operations.
+     */
+    static final int INITIAL_BUFFER_SIZE = 512 * 1024;
+
+    /**
+     * The log prefix.
+     */
+    private final String logPrefix;
+
+    /**
+     * The logger.
+     */
+    private final Logger log;
+
+    /**
+     * The system time.
+     */
+    private final Time time;
+
+    /**
+     * The system timer.
+     */
+    private final Timer timer;
+
+    /**
+     * The write operation timeout
+     */
+    private final Duration writeTimeout;
+
+    /**
+     * The coordinators keyed by topic partition.
+     */
+    private final ConcurrentHashMap<TopicPartition, AsyncCoordinatorContext> coordinators;
+
+    /**
+     * The event processor used by the runtime.
+     */
+    private final CoordinatorEventProcessor processor;
+
+    /**
+     * The partition writer used by the runtime to persist records.
+     */
+    private final PartitionWriter partitionWriter;
+
+    /**
+     * The coordinator loaded used by the runtime.
+     */
+    private final CoordinatorLoader<U> loader;
+
+    /**
+     * The coordinator state machine builder used by the runtime
+     * to instantiate a coordinator.
+     */
+    private final CoordinatorShardBuilderSupplier<S, U> coordinatorShardBuilderSupplier;
+
+    /**
+     * The coordinator runtime metrics.
+     */
+    private final CoordinatorRuntimeMetrics runtimeMetrics;
+
+    /**
+     * The coordinator metrics.
+     */
+    private final CoordinatorMetrics coordinatorMetrics;
+
+    /**
+     * The serializer used to serialize records.
+     */
+    private final Serializer<U> serializer;
+
+    /**
+     * The compression codec used when writing records.
+     */
+    private final Compression compression;
+
+    /**
+     * The duration in milliseconds that the coordinator will wait for writes to
+     * accumulate before flushing them to disk. {@code OptionalInt.empty()} indicates
+     * an adaptive linger time based on the workload.
+     */
+    private final OptionalInt appendLingerMs;
+
+    /**
+     * The executor service used by the coordinator runtime to schedule
+     * asynchronous tasks.
+     */
+    private final ExecutorService executorService;
+
+    /**
+     * The maximum buffer size that the coordinator can cache.
+     */
+    private final Supplier<Integer> cachedBufferMaxBytesSupplier;
+
+    /**
+     * Atomic boolean indicating whether the runtime is running.
+     */
+    private final AtomicBoolean isRunning = new AtomicBoolean(true);
+
+    /**
+     * The latest known metadata image.
+     */
+    private volatile CoordinatorMetadataImage metadataImage = CoordinatorMetadataImage.EMPTY;
+
+    /**
+     * Constructor.
+     *
+     * @param logPrefix                         The log prefix.
+     * @param logContext                        The log context.
+     * @param processor                         The event processor.
+     * @param partitionWriter                   The partition writer.
+     * @param loader                            The coordinator loader.
+     * @param coordinatorShardBuilderSupplier   The coordinator builder.
+     * @param time                              The system time.
+     * @param timer                             The system timer.
+     * @param writeTimeout                      The write operation timeout.
+     * @param runtimeMetrics                    The runtime metrics.
+     * @param coordinatorMetrics                The coordinator metrics.
+     * @param serializer                        The serializer.
+     * @param compression                       The compression codec.
+     * @param appendLingerMs                    The append linger time in ms.
+     * @param executorService                   The executor service.
+     * @param cachedBufferMaxBytesSupplier      The cached buffer max bytes supplier.
+     */
+    @SuppressWarnings("checkstyle:ParameterNumber")
+    private AsyncCoordinatorRuntime(
+            String logPrefix,
+            LogContext logContext,
+            CoordinatorEventProcessor processor,
+            PartitionWriter partitionWriter,
+            CoordinatorLoader<U> loader,
+            CoordinatorShardBuilderSupplier<S, U> coordinatorShardBuilderSupplier,
+            Time time,
+            Timer timer,
+            Duration writeTimeout,
+            CoordinatorRuntimeMetrics runtimeMetrics,
+            CoordinatorMetrics coordinatorMetrics,
+            Serializer<U> serializer,
+            Compression compression,
+            OptionalInt appendLingerMs,
+            ExecutorService executorService,
+            Supplier<Integer> cachedBufferMaxBytesSupplier
+    ) {
+        this.logPrefix = logPrefix;
+        this.log = logContext.logger(AsyncCoordinatorRuntime.class);
+        this.time = time;
+        this.timer = timer;
+        this.writeTimeout = writeTimeout;
+        this.coordinators = new ConcurrentHashMap<>();
+        this.processor = processor;
+        this.partitionWriter = partitionWriter;
+        this.loader = loader;
+        this.coordinatorShardBuilderSupplier = coordinatorShardBuilderSupplier;
+        this.runtimeMetrics = runtimeMetrics;
+        this.coordinatorMetrics = coordinatorMetrics;
+        this.serializer = serializer;
+        this.compression = compression;
+        this.appendLingerMs = appendLingerMs;
+        this.executorService = executorService;
+        this.cachedBufferMaxBytesSupplier = cachedBufferMaxBytesSupplier;
+        this.runtimeMetrics.registerBufferCacheSizeGauge(
+                () -> coordinators.values().stream().mapToLong(c -> c.cachedBufferSize.get()).sum()
+        );
+    }
+
+    /**
+     * Throws a NotCoordinatorException exception if the runtime is not
+     * running.
+     */
+    private void throwIfNotRunning() {
+        if (!isRunning.get()) {
+            throw Errors.NOT_COORDINATOR.exception();
+        }
+    }
+
+    /**
+     * Enqueues a new event at the end of the processing queue.
+     *
+     * @param event The event.
+     * @throws NotCoordinatorException If the event processor is closed.
+     */
+    private void enqueueLast(CoordinatorEvent event) {
+        try {
+            processor.enqueueLast(event);
+        } catch (RejectedExecutionException ex) {
+            throw new NotCoordinatorException("Can't accept an event because the processor is closed", ex);
+        }
+    }
+
+    /**
+     * Enqueues a new event at the front of the processing queue.
+     *
+     * @param event The event.
+     * @throws NotCoordinatorException If the event processor is closed.
+     */
+    private void enqueueFirst(CoordinatorEvent event) {
+        try {
+            processor.enqueueFirst(event);
+        } catch (RejectedExecutionException ex) {
+            throw new NotCoordinatorException("Can't accept an event because the processor is closed", ex);
+        }
+    }
+
+    /**
+     * @return The coordinator context or a new context if it does not exist.
+     * Package private for testing.
+     */
+    AsyncCoordinatorContext maybeCreateContext(TopicPartition tp) {
+        return coordinators.computeIfAbsent(tp, AsyncCoordinatorContext::new);
+    }
+
+    /**
+     * @return The coordinator context or thrown an exception if it does
+     * not exist.
+     * @throws NotCoordinatorException
+     * Package private for testing.
+     */
+    AsyncCoordinatorContext contextOrThrow(TopicPartition tp) throws NotCoordinatorException {
+        AsyncCoordinatorContext context = coordinators.get(tp);
+
+        if (context == null) {
+            throw Errors.NOT_COORDINATOR.exception();
+        } else {
+            return context;
+        }
+    }
+
+    /**
+     * Calls the provided function with the context iff the context is active; throws
+     * an exception otherwise. This method ensures that the context lock is acquired
+     * before calling the function and releases afterwards.
+     *
+     * @param tp    The topic partition.
+     * @param func  The function that will receive the context.
+     * @throws NotCoordinatorException
+     * @throws CoordinatorLoadInProgressException
+     */
+    private void withActiveContextOrThrow(
+            TopicPartition tp,
+            Consumer<AsyncCoordinatorContext> func
+    ) throws NotCoordinatorException, CoordinatorLoadInProgressException {
+        AsyncCoordinatorContext context = contextOrThrow(tp);
+
+        try {
+            context.lock.lock();
+            if (context.state == CoordinatorState.ACTIVE) {
+                func.accept(context);
+            } else if (context.state == CoordinatorState.LOADING) {
+                throw Errors.COORDINATOR_LOAD_IN_PROGRESS.exception();
+            } else {
+                throw Errors.NOT_COORDINATOR.exception();
+            }
+        } finally {
+            context.lock.unlock();
+        }
+    }
+
+    /**
+     * Schedules a write operation.
+     *
+     * @param name      The name of the write operation.
+     * @param tp        The address of the coordinator (aka its topic-partitions).
+     * @param op        The write operation.
+     *
+     * @return A future that will be completed with the result of the write operation
+     * when the operation is completed or an exception if the write operation failed.
+     *
+     * @param <T> The type of the result.
+     */
+    @Override
+    public <T> CompletableFuture<T> scheduleWriteOperation(
+            String name,
+            TopicPartition tp,
+            CoordinatorWriteOperation<S, T, U> op
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of write operation {}.", name);
+        AsyncCoordinatorWriteEvent<T> event = new AsyncCoordinatorWriteEvent<>(name, tp, writeTimeout, op);
+        enqueueLast(event);
+        return event.future;
+    }
+
+    /**
+     * Schedule a write operation for each coordinator.
+     *
+     * @param name      The name of the write operation.
+     * @param op        The write operation.
+     *
+     * @return A list of futures where each future will be completed with the result of the write operation
+     * when the operation is completed or an exception if the write operation failed.
+     *
+     * @param <T> The type of the result.
+     */
+    @Override
+    public <T> List<CompletableFuture<T>> scheduleWriteAllOperation(
+            String name,
+            CoordinatorWriteOperation<S, T, U> op
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of write all operation {}.", name);
+        return coordinators
+                .keySet()
+                .stream()
+                .map(tp -> scheduleWriteOperation(name, tp, op))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Schedules a transactional write operation.
+     *
+     * @param name              The name of the write operation.
+     * @param tp                The address of the coordinator (aka its topic-partitions).
+     * @param transactionalId   The transactional id.
+     * @param producerId        The producer id.
+     * @param producerEpoch     The producer epoch.
+     * @param op                The write operation.
+     * @param apiVersion        The Version of the Txn_Offset_Commit request
+     *
+     * @return A future that will be completed with the result of the write operation
+     * when the operation is completed or an exception if the write operation failed.
+     *
+     * @param <T> The type of the result.
+     */
+    @Override
+    public <T> CompletableFuture<T> scheduleTransactionalWriteOperation(
+            String name,
+            TopicPartition tp,
+            String transactionalId,
+            long producerId,
+            short producerEpoch,
+            CoordinatorWriteOperation<S, T, U> op,
+            int apiVersion
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of transactional write operation {}.", name);
+        return partitionWriter.maybeStartTransactionVerification(
+                tp,
+                transactionalId,
+                producerId,
+                producerEpoch,
+                apiVersion
+        ).thenCompose(verificationGuard -> {
+            AsyncCoordinatorWriteEvent<T> event = new AsyncCoordinatorWriteEvent<>(
+                    name,
+                    tp,
+                    transactionalId,
+                    producerId,
+                    producerEpoch,
+                    verificationGuard,
+                    writeTimeout,
+                    op
+            );
+            enqueueLast(event);
+            return event.future;
+        });
+    }
+
+    /**
+     * Schedules the transaction completion.
+     *
+     * @param name              The name of the operation.
+     * @param tp                The address of the coordinator (aka its topic-partitions).
+     * @param producerId        The producer id.
+     * @param producerEpoch     The producer epoch.
+     * @param coordinatorEpoch  The epoch of the transaction coordinator.
+     * @param result            The transaction result.
+     * @param transactionVersion The transaction version (1 = TV1, 2 = TV2, etc.).
+     *
+     * @return A future that will be completed with null when the operation is
+     * completed or an exception if the operation failed.
+     */
+    @Override
+    public CompletableFuture<Void> scheduleTransactionCompletion(
+            String name,
+            TopicPartition tp,
+            long producerId,
+            short producerEpoch,
+            int coordinatorEpoch,
+            TransactionResult result,
+            short transactionVersion
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of transaction completion for {} with producer id={}, producer epoch={}, " +
+                "coordinator epoch={}, transaction version={} and transaction result={}.", tp, producerId, producerEpoch, coordinatorEpoch, transactionVersion, result);
+        AsyncCoordinatorCompleteTransactionEvent event = new AsyncCoordinatorCompleteTransactionEvent(
+                name,
+                tp,
+                producerId,
+                producerEpoch,
+                coordinatorEpoch,
+                result,
+                transactionVersion,
+                writeTimeout
+        );
+        enqueueLast(event);
+        return event.future;
+    }
+
+    /**
+     * Schedules a read operation.
+     *
+     * @param name  The name of the read operation.
+     * @param tp    The address of the coordinator (aka its topic-partitions).
+     * @param op    The read operation.
+     *
+     * @return A future that will be completed with the result of the read operation
+     * when the operation is completed or an exception if the read operation failed.
+     *
+     * @param <T> The type of the result.
+     */
+    @Override
+    public <T> CompletableFuture<T> scheduleReadOperation(
+            String name,
+            TopicPartition tp,
+            CoordinatorReadOperation<S, T> op
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of read operation {}.", name);
+        AsyncCoordinatorReadEvent<T> event = new AsyncCoordinatorReadEvent<>(name, tp, op);
+        enqueueLast(event);
+        return event.future;
+    }
+
+    /**
+     * Schedules a read operation for each coordinator.
+     *
+     * @param name  The name of the read operation.
+     * @param op    The read operation.
+     *
+     * @return A list of futures where each future will be completed with the result of the read operation
+     * when the operation is completed or an exception if the read operation failed.
+     *
+     * @param <T> The type of the result.
+     */
+    @Override
+    public <T> List<CompletableFuture<T>> scheduleReadAllOperation(
+            String name,
+            CoordinatorReadOperation<S, T> op
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduled execution of read all operation {}.", name);
+        return coordinators
+                .keySet()
+                .stream()
+                .map(tp -> scheduleReadOperation(name, tp, op))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Schedules an internal event.
+     *
+     * @param name  The name of the write operation.
+     * @param tp    The address of the coordinator (aka its topic-partitions).
+     * @param op    The operation.
+     */
+    private void scheduleInternalOperation(
+            String name,
+            TopicPartition tp,
+            Runnable op
+    ) {
+        log.debug("Scheduled execution of internal operation {}.", name);
+        enqueueLast(new AsyncCoordinatorInternalEvent(name, tp, op));
+    }
+
+    /**
+     * Schedules the loading of a coordinator. This is called when the broker is elected as
+     * the leader for a partition.
+     *
+     * @param tp                The topic partition of the coordinator. Records from this
+     *                          partitions will be read and applied to the coordinator.
+     * @param partitionEpoch    The epoch of the partition.
+     */
+    @Override
+    public void scheduleLoadOperation(
+            TopicPartition tp,
+            int partitionEpoch
+    ) {
+        throwIfNotRunning();
+        log.info("Scheduling loading of metadata from {} with epoch {}", tp, partitionEpoch);
+
+        // Touch the state to make the runtime immediately aware of the new coordinator.
+        maybeCreateContext(tp);
+
+        scheduleInternalOperation("Load(tp=" + tp + ", epoch=" + partitionEpoch + ")", tp, () -> {
+            // The context is re-created if it does not exist.
+            AsyncCoordinatorContext context = maybeCreateContext(tp);
+
+            context.lock.lock();
+            try {
+                if (context.epoch < partitionEpoch) {
+                    context.epoch = partitionEpoch;
+
+                    switch (context.state) {
+                        case FAILED:
+                        case INITIAL:
+                            context.transitionTo(CoordinatorState.LOADING);
+                            break;
+                        case LOADING:
+                            log.info("The coordinator {} is already loading metadata.", tp);
+                            break;
+                        case ACTIVE:
+                            log.info("The coordinator {} is already active.", tp);
+                            break;
+                        default:
+                            log.error("Cannot load coordinator {} in state {}.", tp, context.state);
+                    }
+                } else {
+                    log.info("Ignored loading metadata from {} since current epoch {} is larger than or equals to {}.",
+                            context.tp, context.epoch, partitionEpoch);
+                }
+            } finally {
+                context.lock.unlock();
+            }
+        });
+    }
+
+    /**
+     * Schedules the unloading of a coordinator. This is called when the broker is not the
+     * leader anymore.
+     *
+     * @param tp                The topic partition of the coordinator.
+     * @param partitionEpoch    The partition epoch as an optional value.
+     *                          An empty value means that the topic was deleted.
+     */
+    @Override
+    public void scheduleUnloadOperation(
+            TopicPartition tp,
+            OptionalInt partitionEpoch
+    ) {
+        throwIfNotRunning();
+        log.info("Scheduling unloading of metadata for {} with epoch {}", tp, partitionEpoch);
+
+        scheduleInternalOperation("UnloadCoordinator(tp=" + tp + ", epoch=" + partitionEpoch + ")", tp, () -> {
+            AsyncCoordinatorContext context = coordinators.get(tp);
+            if (context != null) {
+                context.lock.lock();
+                try {
+                    if (partitionEpoch.isEmpty() || context.epoch < partitionEpoch.getAsInt()) {
+                        log.info("Started unloading metadata for {} with epoch {}.", tp, partitionEpoch);
+                        try {
+                            context.transitionTo(CoordinatorState.CLOSED);
+                            log.info("Finished unloading metadata for {} with epoch {}.", tp, partitionEpoch);
+                        } catch (Throwable ex) {
+                            // It's very unlikely that we will ever see an exception here, since we
+                            // already make an effort to catch exceptions in the unload method.
+                            log.error("Failed to unload metadata for {} with epoch {} due to {}.",
+                                    tp, partitionEpoch, ex.getMessage(), ex);
+                        } finally {
+                            // Always remove the coordinator context, otherwise the coordinator
+                            // shard could be permanently stuck.
+                            coordinators.remove(tp, context);
+                        }
+                    } else {
+                        log.info("Ignored unloading metadata for {} in epoch {} since current epoch is {}.",
+                                tp, partitionEpoch, context.epoch);
+                    }
+                } finally {
+                    context.lock.unlock();
+                }
+            } else {
+                log.info("Ignored unloading metadata for {} in epoch {} since metadata was never loaded.",
+                        tp, partitionEpoch);
+            }
+        });
+    }
+
+    /**
+     * A new metadata image is available.
+     *
+     * @param delta    The metadata delta.
+     * @param newImage The new metadata image.
+     */
+    @Override
+    public void onMetadataUpdate(
+            CoordinatorMetadataDelta delta,
+            CoordinatorMetadataImage newImage
+    ) {
+        throwIfNotRunning();
+        log.debug("Scheduling applying of a new metadata image with version {}.", newImage.version());
+
+        // Update global image.
+        metadataImage = newImage;
+
+        // Push an event for each coordinator.
+        coordinators.keySet().forEach(tp -> {
+            scheduleInternalOperation("UpdateImage(tp=" + tp + ", version=" + newImage.version() + ")", tp, () -> {
+                AsyncCoordinatorContext context = coordinators.get(tp);
+                if (context != null) {
+                    context.lock.lock();
+                    try {
+                        if (context.state == CoordinatorState.ACTIVE) {
+                            // The new image can be applied to the coordinator only if the coordinator
+                            // exists and is in the active state.
+                            log.debug("Applying new metadata image with version {} to {}.", newImage.version(), tp);
+                            context.coordinator.onMetadataUpdate(delta, newImage);
+                        } else {
+                            log.debug("Ignored new metadata image with version {} for {} because the coordinator is not active.",
+                                    newImage.version(), tp);
+                        }
+                    } finally {
+                        context.lock.unlock();
+                    }
+                } else {
+                    log.debug("Ignored new metadata image with version {} for {} because the coordinator does not exist.",
+                            newImage.version(), tp);
+                }
+            });
+        });
+    }
+
+    /**
+     * Closes the runtime. This closes all the coordinators currently registered
+     * in the runtime.
+     *
+     * @throws Exception
+     */
+    @Override
+    public void close() throws Exception {
+        if (!isRunning.compareAndSet(true, false)) {
+            log.warn("Coordinator runtime is already shutting down.");
+            return;
+        }
+
+        log.info("Closing coordinator runtime.");
+        Utils.closeQuietly(loader, "loader");
+        Utils.closeQuietly(timer, "timer");
+        // This close the processor, drain all the pending events and
+        // reject any new events.
+        Utils.closeQuietly(processor, "event processor");
+        // Unload all the coordinators.
+        coordinators.forEach((tp, context) -> {
+            context.lock.lock();
+            try {
+                context.transitionTo(CoordinatorState.CLOSED);
+            } catch (Throwable ex) {
+                log.warn("Failed to unload metadata for {} due to {}.", tp, ex.getMessage(), ex);
+            } finally {
+                context.lock.unlock();
+            }
+        });
+        coordinators.clear();
+        executorService.shutdown();
+        Utils.closeQuietly(runtimeMetrics, "runtime metrics");
+        log.info("Coordinator runtime closed.");
+    }
+
+    /**
+     * @return List of {@link TopicPartition} whose coordinators are active.
+     */
+    @Override
+    public List<TopicPartition> activeCoordinators() {
+        if (coordinators == null || coordinators.isEmpty()) {
+            return List.of();
+        }
+
+        return coordinators.entrySet().stream()
+                .filter(entry -> entry.getValue().state.equals(CoordinatorState.ACTIVE))
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+}

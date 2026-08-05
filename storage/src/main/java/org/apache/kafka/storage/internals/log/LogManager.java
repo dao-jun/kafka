@@ -60,6 +60,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
@@ -1262,6 +1263,35 @@ public class LogManager {
      * @throws KafkaStorageException if isNew=false, log is not found in the cache and there is offline log directory on the broker
      * @throws InconsistentTopicIdException if the topic ID in the log does not match the topic ID provided
      */
+    /**
+     * Returns true if this log manager operates in async (bookkeeper-backed) log mode.
+     * Overridden by AsyncLogManager; the base LogManager always returns false.
+     * Ported from bk-kafka to allow ReplicaManager/Partition to branch on log mode.
+     */
+    public boolean asyncLogModeEnabled() {
+        return false;
+    }
+
+    /**
+     * Asynchronously create or retrieve a log. Base LogManager does not support async
+     * creation; AsyncLogManager overrides this. Ported from bk-kafka.
+     */
+    public CompletableFuture<? extends UnifiedLog> getOrCreateLogAsync(TopicPartition topicPartition,
+                                                                       boolean isNew,
+                                                                       boolean isFuture,
+                                                                       Optional<Uuid> topicId,
+                                                                       Optional<Uuid> targetLogDirectoryId) {
+        throw new UnsupportedOperationException("Async log creation is not supported by the base LogManager.");
+    }
+
+    /**
+     * Returns the set of directory IDs. Base LogManager derives this from directoryIds();
+     * AsyncLogManager overrides with its own scheme. Ported from bk-kafka.
+     */
+    public Set<Uuid> directoryIdsSet() {
+        return new HashSet<>(directoryIds.values());
+    }
+
     public UnifiedLog getOrCreateLog(TopicPartition topicPartition,
                                      boolean isNew,
                                      boolean isFuture,

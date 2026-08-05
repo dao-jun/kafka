@@ -42,12 +42,14 @@ import org.apache.kafka.common.requests.WriteShareGroupStateResponse;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.coordinator.common.runtime.AsyncCoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorEventProcessor;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorLoader;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRecord;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorRuntimeMetrics;
 import org.apache.kafka.coordinator.common.runtime.CoordinatorShardBuilderSupplier;
+import org.apache.kafka.coordinator.common.runtime.ICoordinatorRuntime;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataDelta;
 import org.apache.kafka.coordinator.common.runtime.KRaftCoordinatorMetadataImage;
 import org.apache.kafka.coordinator.common.runtime.MultiThreadedEventProcessor;
@@ -78,6 +80,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 import static org.apache.kafka.coordinator.common.runtime.CoordinatorOperationExceptionHelper.handleOperationException;
 
@@ -101,7 +104,7 @@ public class ShareCoordinatorService implements ShareCoordinator {
     /**
      * The main coordinator runtime reference used to queue callbacks to the share coordinator shards.
      */
-    private final CoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime;
+    private final ICoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime;
 
     /**
      * Metrics object for recording share coordinator related metrics.
@@ -153,6 +156,8 @@ public class ShareCoordinatorService implements ShareCoordinator {
         private Timer timer;
         private ShareCoordinatorMetrics coordinatorMetrics;
         private CoordinatorRuntimeMetrics coordinatorRuntimeMetrics;
+        private boolean asyncCoordinator = false;
+        private Supplier<Boolean> shareGroupConfigEnabledSupplier = () -> false;
 
         public Builder(int nodeId, ShareCoordinatorConfig config) {
             this.nodeId = nodeId;
@@ -189,6 +194,17 @@ public class ShareCoordinatorService implements ShareCoordinator {
             return this;
         }
 
+        public Builder withShareGroupEnabledConfigSupplier(Supplier<Boolean> shareGroupConfigEnabledSupplier) {
+            this.shareGroupConfigEnabledSupplier = shareGroupConfigEnabledSupplier;
+            return this;
+        }
+
+        public Builder withAsyncCoordinator(boolean enable) {
+            this.asyncCoordinator = enable;
+            return this;
+        }
+
+        @SuppressWarnings("NPathComplexity")
         public ShareCoordinatorService build() {
             if (config == null) {
                 throw new IllegalArgumentException("Config must be set.");
@@ -226,26 +242,48 @@ public class ShareCoordinatorService implements ShareCoordinator {
                 coordinatorRuntimeMetrics
             );
 
-            CoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime =
-                new CoordinatorRuntime.Builder<ShareCoordinatorShard, CoordinatorRecord>()
-                    .withTime(time)
-                    .withTimer(timer)
-                    .withLogPrefix(logPrefix)
-                    .withLogContext(logContext)
-                    .withEventProcessor(processor)
-                    .withPartitionWriter(writer)
-                    .withLoader(loader)
-                    .withCoordinatorShardBuilderSupplier(supplier)
-                    .withTime(time)
-                    .withWriteTimeout(Duration.ofMillis(config.shareCoordinatorWriteTimeoutMs()))
-                    .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
-                    .withCoordinatorMetrics(coordinatorMetrics)
-                    .withSerializer(new ShareCoordinatorRecordSerde())
-                    .withCompression(Compression.of(config.shareCoordinatorStateTopicCompressionType()).build())
-                    .withAppendLingerMs(config.shareCoordinatorAppendLingerMs())
-                    .withExecutorService(Executors.newSingleThreadExecutor())
-                    .withCachedBufferMaxBytesSupplier(config::shareCoordinatorCachedBufferMaxBytes)
-                    .build();
+            ICoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime;
+            if (asyncCoordinator) {
+                runtime = new AsyncCoordinatorRuntime.Builder<ShareCoordinatorShard, CoordinatorRecord>()
+                        .withTime(time)
+                        .withTimer(timer)
+                        .withLogPrefix(logPrefix)
+                        .withLogContext(logContext)
+                        .withEventProcessor(processor)
+                        .withPartitionWriter(writer)
+                        .withLoader(loader)
+                        .withCoordinatorShardBuilderSupplier(supplier)
+                        .withTime(time)
+                        .withWriteTimeout(Duration.ofMillis(config.shareCoordinatorWriteTimeoutMs()))
+                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
+                        .withCoordinatorMetrics(coordinatorMetrics)
+                        .withSerializer(new ShareCoordinatorRecordSerde())
+                        .withCompression(Compression.of(config.shareCoordinatorStateTopicCompressionType()).build())
+                        .withAppendLingerMs(config.shareCoordinatorAppendLingerMs())
+                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withCachedBufferMaxBytesSupplier(config::shareCoordinatorCachedBufferMaxBytes)
+                        .build();
+            } else {
+                runtime = new CoordinatorRuntime.Builder<ShareCoordinatorShard, CoordinatorRecord>()
+                        .withTime(time)
+                        .withTimer(timer)
+                        .withLogPrefix(logPrefix)
+                        .withLogContext(logContext)
+                        .withEventProcessor(processor)
+                        .withPartitionWriter(writer)
+                        .withLoader(loader)
+                        .withCoordinatorShardBuilderSupplier(supplier)
+                        .withTime(time)
+                        .withWriteTimeout(Duration.ofMillis(config.shareCoordinatorWriteTimeoutMs()))
+                        .withCoordinatorRuntimeMetrics(coordinatorRuntimeMetrics)
+                        .withCoordinatorMetrics(coordinatorMetrics)
+                        .withSerializer(new ShareCoordinatorRecordSerde())
+                        .withCompression(Compression.of(config.shareCoordinatorStateTopicCompressionType()).build())
+                        .withAppendLingerMs(config.shareCoordinatorAppendLingerMs())
+                        .withExecutorService(Executors.newSingleThreadExecutor())
+                        .withCachedBufferMaxBytesSupplier(config::shareCoordinatorCachedBufferMaxBytes)
+                        .build();
+            }
 
             return new ShareCoordinatorService(
                 logContext,
@@ -262,7 +300,7 @@ public class ShareCoordinatorService implements ShareCoordinator {
     public ShareCoordinatorService(
         LogContext logContext,
         ShareCoordinatorConfig config,
-        CoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime,
+        ICoordinatorRuntime<ShareCoordinatorShard, CoordinatorRecord> runtime,
         ShareCoordinatorMetrics shareCoordinatorMetrics,
         Time time,
         Timer timer,

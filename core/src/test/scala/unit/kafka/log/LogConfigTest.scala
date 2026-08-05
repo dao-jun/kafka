@@ -77,6 +77,26 @@ class LogConfigTest {
       case TopicConfig.REMOTE_COPY_LAG_BYTES_CONFIG => assertPropertyInvalid(name, "not_a_number", "-2")
       case TopicConfig.ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG => assertPropertyInvalid(name, "not_a_boolean")
       case LogConfig.INTERNAL_SEGMENT_BYTES_CONFIG => // no op
+      // INT configs with atLeast(-1) validator - -1 is valid (unlimited)
+      case "bookkeeper.retention.time.seconds" => // no op
+      case "bookkeeper.retention.size.mb" => // no op
+      // STRING configs with null default - accept any string value, skip number validation
+      case "bookkeeper.client.authentication.parameters" => // no op
+      case "bookkeeper.client.authentication.parameters.name" => // no op
+      case "bookkeeper.client.authentication.plugin" => // no op
+      case "bookkeeper.client.tls.certificate.file.path" => // no op
+      case "bookkeeper.client.tls.key.file.path" => // no op
+      case "bookkeeper.client.tls.key.file.type" => // no op
+      case "bookkeeper.client.tls.key.store.password.path" => // no op
+      case "bookkeeper.client.tls.provider.factory.class" => // no op
+      case "bookkeeper.client.tls.trust.certs.file.path" => // no op
+      case "bookkeeper.client.tls.trust.cert.types" => // no op
+      case "bookkeeper.client.tls.trust.store.password.path" => // no op
+      case "bookkeeper.client.metadata.service.url" => // no op
+      case "bookkeeper.digest.type" => // no op
+      case "bookkeeper.password" => // no op
+      case "bookkeeper.metadata.store.url" => // no op
+      case "ml.info.compression.type" => // no op
 
       case _ => assertPropertyInvalid(name, "not_a_number", "-1")
     })
@@ -237,6 +257,99 @@ class LogConfigTest {
 
     assertEquals(localRetentionMs, logConfig.localRetentionMs)
     assertEquals(localRetentionBytes, logConfig.localRetentionBytes)
+  }
+
+  @Test
+  def testManagedLedgerConfigs(): Unit = {
+    val props = new Properties()
+    val logConfig = new LogConfig(props)
+
+    assertEquals(logConfig.ensembleSize, 2)
+    assertEquals(logConfig.writeQuorumSize, 2)
+    assertEquals(logConfig.ackQuorumSize, 2)
+    assertEquals(logConfig.ledgerDeleteMaxConcurrentRequests, 1000L)
+    assertEquals(logConfig.ledgerDeletionThreads, 1)
+    assertEquals(logConfig.digestTypeName, "CRC32C")
+    assertEquals(logConfig.password, "")
+    assertEquals(logConfig.maxEntriesPerLedger, 50000)
+    assertEquals(logConfig.maxBytesPerLedgerMB, 2048)
+    assertEquals(logConfig.minRolloverTimeMinutes, 10)
+    assertEquals(logConfig.maxRolloverTimeMinutes, 240)
+    assertEquals(logConfig.metadataOperationTimeoutSeconds, 60)
+    assertEquals(logConfig.readEntryTimeoutSeconds, 0)
+    assertEquals(logConfig.addEntryTimeoutSeconds, 0)
+    assertEquals(logConfig.defaultEnsembleSize, 2)
+    assertEquals(logConfig.defaultWriteQuorumSize, 2)
+    assertEquals(logConfig.defaultAckQuorumSize, 2)
+    assertEquals(logConfig.defaultMaxEntriesPerLedger, 50000)
+    assertEquals(logConfig.ledgerRolloverTimeoutSeconds, 14400)
+    assertEquals(logConfig.retentionTimeSeconds, 0)
+    assertEquals(logConfig.retentionSizeMb, 0)
+    assertEquals(logConfig.ledgerForceRecovery, false)
+    assertEquals(logConfig.inactiveLedgerRolloverTimeSeconds, 0)
+    assertEquals(logConfig.metadataStoreUrl, "")
+  }
+
+  @Test
+  def testManagedLedgerFactoryConfigs(): Unit = {
+    val props = new Properties()
+    val logConfig = new LogConfig(props)
+
+    assertEquals(logConfig.maxCacheSizeMb, 512)
+    assertEquals(logConfig.cacheEvictionWatermark, 0.9D)
+    assertEquals(logConfig.numSchedulerThreads, Runtime.getRuntime.availableProcessors())
+    assertEquals(logConfig.cacheEvictionIntervalMs, 10)
+    assertEquals(logConfig.cacheEvictionTimeThresholdMs, 1000)
+    assertEquals(logConfig.copyEntriesInCache, false)
+    assertEquals(logConfig.maxReadInflightSizeMb, 0)
+    assertEquals(logConfig.maxReadInflightSize, 0)
+    assertEquals(logConfig.maxReadInflightPermitsAcquireTimeoutMs, 60_000)
+    assertEquals(logConfig.maxReadInflightPermitsAcquireQueueSize, 50000)
+    assertEquals(logConfig.prometheusStatsLatencyRolloverSeconds, 60)
+    assertEquals(logConfig.traceTaskExecutor, true)
+    assertEquals(logConfig.managedLedgerInfoCompressionType, "NONE")
+    assertEquals(logConfig.managedLedgerInfoCompressionThresholdBytes, 16 * 1024)
+    assertEquals(logConfig.infoStatsPeriodSeconds, 60)
+  }
+
+  @Test
+  def testBookkeeperClientConfigs(): Unit = {
+    val props = new Properties()
+    val logConfig = new LogConfig(props)
+
+    assertEquals(logConfig.bookkeeperClientAuthenticationPlugin, null)
+    assertEquals(logConfig.bookkeeperClientAuthenticationParameters, null)
+    assertEquals(logConfig.bookkeeperTLSClientAuthentication, false)
+    assertEquals(logConfig.bookkeeperTLSCertificateFilePath, null)
+    assertEquals(logConfig.bookkeeperTLSKeyFilePath, null)
+    assertEquals(logConfig.bookkeeperTLSKeyFileType, "PEM")
+    assertEquals(logConfig.bookkeeperTLSKeyStorePasswordPath, null)
+    assertEquals(logConfig.bookkeeperTLSProviderFactoryClass, "org.apache.bookkeeper.tls.TLSContextFactory")
+    assertEquals(logConfig.bookkeeperTLSTrustCertTypes, "PEM")
+    assertEquals(logConfig.bookkeeperTLSTrustStorePasswordPath, null)
+    assertEquals(logConfig.bookkeeperTlsCertFilesRefreshDurationSeconds, 300)
+    assertEquals(logConfig.enableBusyWait, false)
+    assertEquals(logConfig.bookkeeperClientNumWorkerThreads, Runtime.getRuntime.availableProcessors())
+    assertEquals(logConfig.bookkeeperClientThrottleValue, 0)
+    assertEquals(logConfig.bookkeeperMetadataSessionTimeoutMillis, 30_000)
+    assertEquals(logConfig.bookkeeperClientSpeculativeReadTimeoutInMillis, 0)
+    assertEquals(logConfig.bookkeeperNumberOfChannelsPerBookie, 16)
+    assertEquals(logConfig.bookkeeperUseV2WireProtocol, true)
+    assertEquals(logConfig.bookkeeperEnableStickyReads, true)
+    assertEquals(logConfig.bookkeeperNettyMaxFrameSizeBytes, 5 * 1024 * 1024)
+    assertEquals(logConfig.bookkeeperDiskWeightBasedPlacementEnabled, false)
+    assertEquals(logConfig.bookkeeperMetadataServiceUrl, null)
+    assertEquals(logConfig.bookkeeperClientHealthCheckEnabled, true)
+    assertEquals(logConfig.bookkeeperClientHealthCheckErrorThresholdPerInterval, 5)
+    assertEquals(logConfig.bookkeeperClientHealthCheckQuarantineTimeInSeconds, 1800)
+    assertEquals(logConfig.bookkeeperClientQuarantineRatio, 1.0D)
+    assertEquals(logConfig.bookkeeperClientReorderReadSequenceEnabled, true)
+    assertEquals(logConfig.bookkeeperExplicitLacIntervalInMills, 0)
+    assertEquals(logConfig.bookkeeperClientGetBookieInfoIntervalSeconds, 24 * 60 * 60)
+    assertEquals(logConfig.bookkeeperClientGetBookieInfoRetryIntervalSeconds, 60)
+    assertEquals(logConfig.bookkeeperClientNumIoThreads, Runtime.getRuntime.availableProcessors * 2)
+    assertEquals(logConfig.bookkeeperClientLimitStatsLogging, true)
+    assertEquals(logConfig.bookkeeperClientAuthenticationParametersName, null)
   }
 
   @Test
