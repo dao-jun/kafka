@@ -180,6 +180,8 @@ class BrokerServer(
 
   private var shareGroupLogReader: ReplicaManagerLogReader = _
 
+  private val asyncLogModeEnable: Boolean = config.asyncLogModeEnable
+
   private def maybeChangeStatus(from: ProcessStatus, to: ProcessStatus): Boolean = {
     lock.lock()
     try {
@@ -225,13 +227,25 @@ class BrokerServer(
 
       // Create log manager, but don't start it because we need to delay any potential unclean shutdown log recovery
       // until we catch up on the metadata log and have up-to-date topic and broker configs.
-      logManager = LogManager(config,
-        sharedServer.metaPropsEnsemble.errorLogDirs(),
-        metadataCache,
-        kafkaScheduler,
-        time,
-        brokerTopicStats,
-        logDirFailureChannel)
+      logManager = if (!asyncLogModeEnable) {
+        LogManager(config,
+          sharedServer.metaPropsEnsemble.errorLogDirs(),
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel)
+      } else {
+        kafka.log.AsyncLogManager.apply(
+          config,
+          new java.util.ArrayList[String](sharedServer.metaPropsEnsemble.errorLogDirs()),
+          metadataCache,
+          kafkaScheduler,
+          time,
+          brokerTopicStats,
+          logDirFailureChannel
+        )
+      }
 
       lifecycleManager = new BrokerLifecycleManager(
         config,
@@ -359,24 +373,50 @@ class BrokerServer(
        */
       val defaultActionQueue = new DelayedActionQueue
 
-      this._replicaManager = new ReplicaManager(
-        config = config,
-        metrics = metrics,
-        time = time,
-        scheduler = kafkaScheduler,
-        logManager = logManager,
-        remoteLogManager = remoteLogManagerOpt,
-        quotaManagers = quotaManagers,
-        metadataCache = metadataCache,
-        logDirFailureChannel = logDirFailureChannel,
-        alterPartitionManager = alterPartitionManager,
-        brokerTopicStats = brokerTopicStats,
-        delayedRemoteFetchPurgatoryParam = None,
-        brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
-        addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
-        directoryEventHandler = directoryEventHandler,
-        defaultActionQueue = defaultActionQueue
-      )
+      this._replicaManager = if (!asyncLogModeEnable) {
+        new ReplicaManager(
+          config = config,
+          metrics = metrics,
+          time = time,
+          scheduler = kafkaScheduler,
+          logManager = logManager,
+          remoteLogManager = remoteLogManagerOpt,
+          quotaManagers = quotaManagers,
+          metadataCache = metadataCache,
+          logDirFailureChannel = logDirFailureChannel,
+          alterPartitionManager = alterPartitionManager,
+          brokerTopicStats = brokerTopicStats,
+          delayedRemoteFetchPurgatoryParam = None,
+          brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
+          addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
+          directoryEventHandler = directoryEventHandler,
+          defaultActionQueue = defaultActionQueue
+        )
+      } else {
+        new AsyncReplicaManager(
+          config = config,
+          metrics = metrics,
+          time = time,
+          scheduler = kafkaScheduler,
+          logManager = logManager,
+          remoteLogManager = remoteLogManagerOpt,
+          quotaManagers = quotaManagers,
+          metadataCache = metadataCache,
+          logDirFailureChannel = logDirFailureChannel,
+          alterPartitionManager = alterPartitionManager,
+          brokerTopicStats = brokerTopicStats,
+          delayedProducePurgatoryParam = None,
+          delayedFetchPurgatoryParam = None,
+          delayedDeleteRecordsPurgatoryParam = None,
+          delayedRemoteFetchPurgatoryParam = None,
+          delayedRemoteListOffsetsPurgatoryParam = None,
+          delayedShareFetchPurgatoryParam = None,
+          brokerEpochSupplier = () => lifecycleManager.brokerEpoch,
+          addPartitionsToTxnManager = Some(addPartitionsToTxnManager),
+          directoryEventHandler = directoryEventHandler,
+          defaultActionQueue = defaultActionQueue
+        )
+      }
 
       /* start token manager */
       tokenManager = new DelegationTokenManager(new DelegationTokenManagerConfigs(config), tokenCache)

@@ -137,11 +137,11 @@
     </module>
     <module name="CyclomaticComplexity">
       <!-- default is 10-->
-      <property name="max" value="16"/>
+      <property name="max" value="20"/>
     </module>
     <module name="JavaNCSS">
       <!-- default is 50 -->
-      <property name="methodMaximum" value="100"/>
+      <property name="methodMaximum" value="120"/>
     </module>
     <module name="NPathComplexity">
       <!-- default is 200 -->

@@ -45,6 +45,10 @@
   <disallow class="com.yammer.metrics.Metrics" />
   <allow pkg="com.yammer.metrics"/>
 
+  <!-- bookkeeper / pulsar imports (async log support, ported from bk-kafka) -->
+  <allow pkg="org.apache.pulsar" />
+  <allow pkg="org.apache.bookkeeper" />
+
   <subpackage name="tools">
     <allow pkg="joptsimple" />
   </subpackage>
@@ -59,6 +63,12 @@
     <allow class="com.fasterxml.jackson.annotation.JsonProperty" />
     <allow class="com.fasterxml.jackson.annotation.JsonPropertyOrder" />
     <allow class="com.fasterxml.jackson.annotation.JsonIgnoreProperties" />
+  </subpackage>
+
+  <subpackage name="log">
+    <!-- AsyncLogManager (Java) needs access to storage/metadata/coordinator/server packages -->
+    <allow pkg="kafka" />
+    <allow pkg="org.apache.kafka" />
   </subpackage>
 
   <subpackage name="server">

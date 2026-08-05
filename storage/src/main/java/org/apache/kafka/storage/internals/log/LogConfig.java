@@ -18,6 +18,7 @@ package org.apache.kafka.storage.internals.log;
 
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.config.AsyncLogConfigs;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.ConfigKey;
 import org.apache.kafka.common.config.ConfigDef.Type;
@@ -147,7 +148,7 @@ public class LogConfig extends AbstractConfig {
     public static final String INTERNAL_SEGMENT_BYTES_CONFIG = "internal.segment.bytes";
     public static final String INTERNAL_SEGMENT_BYTES_DOC = "The maximum size of a single log file. This should be used for testing only.";
 
-    public static final ConfigDef SERVER_CONFIG_DEF = new ConfigDef()
+    public static final ConfigDef SERVER_CONFIG_DEF = addAsyncLogConfigDefs(new ConfigDef())
             .define(ServerLogConfigs.NUM_PARTITIONS_CONFIG, INT, ServerLogConfigs.NUM_PARTITIONS_DEFAULT, atLeast(1), MEDIUM, ServerLogConfigs.NUM_PARTITIONS_DOC)
             .define(ServerLogConfigs.LOG_DIR_CONFIG, LIST, ServerLogConfigs.LOG_DIR_DEFAULT, ConfigDef.ValidList.anyNonDuplicateValues(false, false), HIGH, ServerLogConfigs.LOG_DIR_DOC)
             .define(ServerLogConfigs.LOG_DIRS_CONFIG, LIST, null, ConfigDef.ValidList.anyNonDuplicateValues(false, true), HIGH, ServerLogConfigs.LOG_DIRS_DOC)
@@ -187,9 +188,93 @@ public class LogConfig extends AbstractConfig {
             .define(ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_CONFIG, LONG, ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_DEFAULT, atLeast(1), LOW, ServerLogConfigs.LOG_DIR_FAILURE_TIMEOUT_MS_DOC)
             .defineInternal(ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_CONFIG, LONG, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DEFAULT, atLeast(0), LOW, ServerLogConfigs.LOG_INITIAL_TASK_DELAY_MS_DOC);
 
+    private static ConfigDef addAsyncLogConfigDefs(ConfigDef configDef) {
+        // AsyncLogMode configuration
+        return configDef.define(AsyncLogConfigs.LOG_ASYNC_MODE, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_ENSEMBLE_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_WRITE_QUORUM_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_ACK_QUORUM_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETE_MAX_CONCURRENT_REQUESTS, INT, 1000, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETION_THREADS, INT, 1, between(1, 4), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_DIGEST_TYPE, STRING, "CRC32C", in("CRC32", "CRC32C", "MAC", "DUMMY"), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_PASSWORD, STRING, "", HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_MAX_ENTRIES_PER_LEDGER, INT, 50000, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_MAX_BYTES_PER_LEDGER_MB, INT, 2048, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_MIN_ROLLOVER_TIME_MINUTES, INT, 10, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_MAX_ROLLOVER_TIME_MINUTES, INT, 240, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_OPERATION_TIMEOUT_SECONDS, INT, 60, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_READ_ENTRY_TIMEOUT_SECONDS, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_ADD_ENTRY_TIMEOUT_SECONDS, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_ENSEMBLE_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_WRITE_QUORUM_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_ACK_QUORUM_SIZE, INT, 2, between(1, 5), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_MAX_ENTRIES_PER_LEDGER, INT, 50000, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_LEDGER_ROLLOVER_TIMEOUT_SECONDS, INT, 14400, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_RETENTION_TIME_SECONDS, INT, 0, atLeast(-1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_RETENTION_SIZE_MB, INT, 0, atLeast(-1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_AUTO_SKIP_NONRECORVERABLE_DATA, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_LEDGER_FORCE_RECOVERY, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_INACTIVE_LEDGER_ROLLOVER_TIME_SECONDS, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_METADATA_STORE_URL, STRING, "", HIGH, "")
+                // Managed Ledger Factory configuration
+                .define(AsyncLogConfigs.ML_MAX_CACHE_SIZE_MB, INT, 512, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_CACHE_EVICTION_WATERMARK, DOUBLE, 0.9, atLeast(0.0), HIGH, "")
+                .define(AsyncLogConfigs.ML_NUM_SCHEDULER_THREADS, INT, Runtime.getRuntime().availableProcessors(), atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.ML_CACHE_EVICTION_INTERVAL_MS, INT, 10, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.ML_CACHE_EVICTION_TIME_THRESHOLD_MS, INT, 1000, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.ML_COPY_ENTRIES_IN_CACHE, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.ML_MAX_READ_IN_FLIGHT_SIZE_MB, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_MAX_READS_INFLIGHT_SIZE, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_TIMEOUT_MS, INT, 60_000, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_QUEUE_SIZE, INT, 50000, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_PROMETHEUS_STATS_LATENCY_ROLLOVER_SECONDS, INT, 60, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.ML_TRACE_TASK_EXECUTION, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.ML_INFO_COMPRESSION_TYPE, STRING, "NONE", in("NONE", "LZ4", "ZLIB", "ZSTD", "SNAPPY"), HIGH, "")
+                .define(AsyncLogConfigs.ML_INFO_COMPRESSION_THRESHOLD_BYTES, INT, 16 * 1024, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.ML_STATS_PERIOD_SECONDS, INT, 60, atLeast(1), HIGH, "")
+                // Bookkeeper Client configuration
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PLUGIN, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_AUTHENTICATION, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERTIFICATE_FILE_PATH, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_PATH, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_TYPE, STRING, "PEM", in("PEM", "JKS", "PKCS12"), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_STORE_PASSWORD_PATH, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_PROVIDER_FACTORY_CLASS, STRING, "org.apache.bookkeeper.tls.TLSContextFactory", null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERTS_FILE_PATH, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERT_TYPES, STRING, "PEM", in("PEM", "JKS", "PKCS12"), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_STORE_PASSWORD_PATH, STRING, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERT_FILES_REFRESH_DURATION_SECONDS, INT, 300, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_BUSY_WAIT, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_WORKER_THREADS, INT, Runtime.getRuntime().availableProcessors(), atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_THROTTLE_VALUE, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SESSION_TIMEOUT_MILLIS, INT, 30_000, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_TIMEOUT_SECONDS, INT, 30_000, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_SPECULATIVE_READ_TIMEOUT_MILLIS, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE, INT, 4, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_USE_V2_WIRE_PROTOCOL, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_STICKY_READS, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NETTY_MAX_FRAME_SIZE_BYTES, INT, 5 * 1024 * 1024, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_DISK_WEIGHT_BASED_PLACEMENT_ENABLED, BOOLEAN, false, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SERVICE_URL, STRING, null, null, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ENABLED, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_INTERVAL_SECONDS, INT, 60, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ERROR_THRESHOLD_PER_INTERVAL, INT, 5, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_QUARANTINE_TIME_IN_SECONDS, INT, 1800, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_QUARANTINE_RATIO, DOUBLE, 1.0, atLeast(0.0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_REORDER_READ_SEQUENCE_ENABLED, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_EXPLICIT_LAC_INTERVAL_IN_MILLS, INT, 0, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_INTERVAL_SECONDS, INT, 24 * 60 * 60, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_RETRY_INTERVAL_SECONDS, INT, 60, atLeast(0), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_IO_THREADS, INT, Runtime.getRuntime().availableProcessors() * 2, atLeast(1), HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_LIMIT_STATS_LOGGING, BOOLEAN, true, HIGH, "")
+                .define(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS_NAME, STRING, null, null, HIGH, "");
+    }
+
     private static final LogConfigDef CONFIG = new LogConfigDef();
+
     static {
-        CONFIG.
+        addAsyncLogConfigDefs(CONFIG).
                 define(TopicConfig.SEGMENT_BYTES_CONFIG, INT, DEFAULT_SEGMENT_BYTES, atLeast(1024 * 1024), MEDIUM,
                         TopicConfig.SEGMENT_BYTES_DOC)
                 .define(TopicConfig.SEGMENT_MS_CONFIG, LONG, DEFAULT_SEGMENT_MS, atLeast(1), MEDIUM, TopicConfig.SEGMENT_MS_DOC)
@@ -296,6 +381,90 @@ public class LogConfig extends AbstractConfig {
     public final List<String> leaderReplicationThrottledReplicas;
     public final List<String> followerReplicationThrottledReplicas;
 
+    // Log IMPL config
+    public final boolean asyncLogModeEnable;
+    // ML config
+    public final int ensembleSize;
+    public final int writeQuorumSize;
+    public final int ackQuorumSize;
+    public final int ledgerDeleteMaxConcurrentRequests;
+    public final int ledgerDeletionThreads;
+    public final String digestTypeName;
+    public final String password;
+    public final int maxEntriesPerLedger;
+    public final int maxBytesPerLedgerMB;
+    public final int minRolloverTimeMinutes;
+    public final int maxRolloverTimeMinutes;
+    public final int metadataOperationTimeoutSeconds;
+    public final int readEntryTimeoutSeconds;
+    public final int addEntryTimeoutSeconds;
+    public final int defaultEnsembleSize;
+    public final int defaultWriteQuorumSize;
+    public final int defaultAckQuorumSize;
+    public final int defaultMaxEntriesPerLedger;
+    public final int ledgerRolloverTimeoutSeconds;
+    public final int retentionTimeSeconds;
+    public final int retentionSizeMb;
+    public final boolean autoSkipNonRecoverableData;
+    public final boolean ledgerForceRecovery;
+    public final int inactiveLedgerRolloverTimeSeconds;
+    public final String metadataStoreUrl;
+
+    // ML Factory config
+    public final int maxCacheSizeMb;
+    public final double cacheEvictionWatermark;
+    public final int numSchedulerThreads;
+    public final int cacheEvictionIntervalMs;
+    public final int cacheEvictionTimeThresholdMs;
+    public final boolean copyEntriesInCache;
+    public final int maxReadInflightSizeMb;
+    public final int maxReadInflightSize;
+    public final int maxReadInflightPermitsAcquireTimeoutMs;
+    public final int maxReadInflightPermitsAcquireQueueSize;
+    public final int prometheusStatsLatencyRolloverSeconds;
+    public final boolean traceTaskExecutor;
+    public final String managedLedgerInfoCompressionType;
+    public final int managedLedgerInfoCompressionThresholdBytes;
+    public final int infoStatsPeriodSeconds;
+
+    // Bookkeeper Client Config
+    public final String bookkeeperClientAuthenticationPlugin;
+    public final String bookkeeperClientAuthenticationParameters;
+    public final boolean bookkeeperTLSClientAuthentication;
+    public final String bookkeeperTLSCertificateFilePath;
+    public final String bookkeeperTLSKeyFilePath;
+    public final String bookkeeperTLSKeyFileType;
+    public final String bookkeeperTLSKeyStorePasswordPath;
+    public final String bookkeeperTLSProviderFactoryClass;
+    public final String bookkeeperTLSTrustCertsFilePath;
+    public final String bookkeeperTLSTrustCertTypes;
+    public final String bookkeeperTLSTrustStorePasswordPath;
+    public final int bookkeeperTlsCertFilesRefreshDurationSeconds;
+    public final boolean enableBusyWait;
+    public final int bookkeeperClientNumWorkerThreads;
+    public final int bookkeeperClientThrottleValue;
+    public final int bookkeeperMetadataSessionTimeoutMillis;
+    public final int bookkeeperClientTimeoutInSeconds;
+    public final int bookkeeperClientSpeculativeReadTimeoutInMillis;
+    public final int bookkeeperNumberOfChannelsPerBookie;
+    public final boolean bookkeeperUseV2WireProtocol;
+    public final boolean bookkeeperEnableStickyReads;
+    public final int bookkeeperNettyMaxFrameSizeBytes;
+    public final boolean bookkeeperDiskWeightBasedPlacementEnabled;
+    public final String bookkeeperMetadataServiceUrl;
+    public final boolean bookkeeperClientHealthCheckEnabled;
+    public final int bookkeeperClientHealthCheckIntervalSeconds;
+    public final int bookkeeperClientHealthCheckErrorThresholdPerInterval;
+    public final int bookkeeperClientHealthCheckQuarantineTimeInSeconds;
+    public final double bookkeeperClientQuarantineRatio;
+    public final boolean bookkeeperClientReorderReadSequenceEnabled;
+    public final int bookkeeperExplicitLacIntervalInMills;
+    public final int bookkeeperClientGetBookieInfoIntervalSeconds;
+    public final int bookkeeperClientGetBookieInfoRetryIntervalSeconds;
+    public final int bookkeeperClientNumIoThreads;
+    public final String bookkeeperClientAuthenticationParametersName;
+    public final boolean bookkeeperClientLimitStatsLogging;
+
     private final RemoteLogConfig remoteLogConfig;
     private final int maxMessageSize;
     private final Map<?, ?> props;
@@ -346,6 +515,86 @@ public class LogConfig extends AbstractConfig {
         this.followerReplicationThrottledReplicas = Collections.unmodifiableList(getList(QuotaConfig.FOLLOWER_REPLICATION_THROTTLED_REPLICAS_CONFIG));
         this.errorsDeadletterqueueGroupEnable = getBoolean(TopicConfig.ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG);
 
+        this.asyncLogModeEnable = getBoolean(AsyncLogConfigs.LOG_ASYNC_MODE);
+        // Bookkeeper client configs
+        this.bookkeeperClientAuthenticationPlugin = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PLUGIN);
+        this.bookkeeperClientAuthenticationParameters = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS);
+        this.bookkeeperTLSClientAuthentication = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_AUTHENTICATION);
+        this.bookkeeperTLSCertificateFilePath = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERTIFICATE_FILE_PATH);
+        this.bookkeeperTLSKeyFilePath = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_PATH);
+        this.bookkeeperTLSKeyFileType = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_FILE_TYPE);
+        this.bookkeeperTLSKeyStorePasswordPath = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_KEY_STORE_PASSWORD_PATH);
+        this.bookkeeperTLSProviderFactoryClass = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_PROVIDER_FACTORY_CLASS);
+        this.bookkeeperTLSTrustCertsFilePath = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERTS_FILE_PATH);
+        this.bookkeeperTLSTrustCertTypes = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_CERT_TYPES);
+        this.bookkeeperTLSTrustStorePasswordPath = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_TRUST_STORE_PASSWORD_PATH);
+        this.bookkeeperTlsCertFilesRefreshDurationSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_TLS_CERT_FILES_REFRESH_DURATION_SECONDS);
+        this.enableBusyWait = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_BUSY_WAIT);
+        this.bookkeeperClientNumWorkerThreads = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_WORKER_THREADS);
+        this.bookkeeperClientThrottleValue = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_THROTTLE_VALUE);
+        this.bookkeeperMetadataSessionTimeoutMillis = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SESSION_TIMEOUT_MILLIS);
+        this.bookkeeperClientTimeoutInSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_TIMEOUT_SECONDS);
+        this.bookkeeperClientSpeculativeReadTimeoutInMillis = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_SPECULATIVE_READ_TIMEOUT_MILLIS);
+        this.bookkeeperNumberOfChannelsPerBookie = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUMBER_OF_CHANNEL_PER_BOOKIE);
+        this.bookkeeperUseV2WireProtocol = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_USE_V2_WIRE_PROTOCOL);
+        this.bookkeeperEnableStickyReads = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_ENABLE_STICKY_READS);
+        this.bookkeeperNettyMaxFrameSizeBytes = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NETTY_MAX_FRAME_SIZE_BYTES);
+        this.bookkeeperDiskWeightBasedPlacementEnabled = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_DISK_WEIGHT_BASED_PLACEMENT_ENABLED);
+        this.bookkeeperMetadataServiceUrl = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_METADATA_SERVICE_URL);
+        this.bookkeeperClientHealthCheckEnabled = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ENABLED);
+        this.bookkeeperClientHealthCheckIntervalSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_INTERVAL_SECONDS);
+        this.bookkeeperClientHealthCheckErrorThresholdPerInterval = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_ERROR_THRESHOLD_PER_INTERVAL);
+        this.bookkeeperClientHealthCheckQuarantineTimeInSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_HEALTH_CHECK_QUARANTINE_TIME_IN_SECONDS);
+        this.bookkeeperClientQuarantineRatio = getDouble(AsyncLogConfigs.BOOKKEEPER_CLIENT_QUARANTINE_RATIO);
+        this.bookkeeperClientReorderReadSequenceEnabled = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_REORDER_READ_SEQUENCE_ENABLED);
+        this.bookkeeperExplicitLacIntervalInMills = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_EXPLICIT_LAC_INTERVAL_IN_MILLS);
+        this.bookkeeperClientGetBookieInfoIntervalSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_INTERVAL_SECONDS);
+        this.bookkeeperClientGetBookieInfoRetryIntervalSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_GET_BOOKIE_INFO_RETRY_INTERVAL_SECONDS);
+        this.bookkeeperClientNumIoThreads = getInt(AsyncLogConfigs.BOOKKEEPER_CLIENT_NUM_IO_THREADS);
+        this.bookkeeperClientAuthenticationParametersName = getString(AsyncLogConfigs.BOOKKEEPER_CLIENT_AUTHENTICATION_PARAMETERS_NAME);
+        this.bookkeeperClientLimitStatsLogging = getBoolean(AsyncLogConfigs.BOOKKEEPER_CLIENT_LIMIT_STATS_LOGGING);
+        // Managed Ledger Factory Configs
+        this.maxCacheSizeMb = getInt(AsyncLogConfigs.ML_MAX_CACHE_SIZE_MB);
+        this.cacheEvictionWatermark = getDouble(AsyncLogConfigs.ML_CACHE_EVICTION_WATERMARK);
+        this.numSchedulerThreads = getInt(AsyncLogConfigs.ML_NUM_SCHEDULER_THREADS);
+        this.cacheEvictionIntervalMs = getInt(AsyncLogConfigs.ML_CACHE_EVICTION_INTERVAL_MS);
+        this.cacheEvictionTimeThresholdMs = getInt(AsyncLogConfigs.ML_CACHE_EVICTION_TIME_THRESHOLD_MS);
+        this.copyEntriesInCache = getBoolean(AsyncLogConfigs.ML_COPY_ENTRIES_IN_CACHE);
+        this.maxReadInflightSizeMb = getInt(AsyncLogConfigs.ML_MAX_READ_IN_FLIGHT_SIZE_MB);
+        this.maxReadInflightSize = getInt(AsyncLogConfigs.ML_MAX_READS_INFLIGHT_SIZE);
+        this.maxReadInflightPermitsAcquireTimeoutMs = getInt(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_TIMEOUT_MS);
+        this.maxReadInflightPermitsAcquireQueueSize = getInt(AsyncLogConfigs.ML_MAX_READ_INFLIGHT_PERMITS_ACQUIRE_QUEUE_SIZE);
+        this.prometheusStatsLatencyRolloverSeconds = getInt(AsyncLogConfigs.ML_PROMETHEUS_STATS_LATENCY_ROLLOVER_SECONDS);
+        this.traceTaskExecutor = getBoolean(AsyncLogConfigs.ML_TRACE_TASK_EXECUTION);
+        this.managedLedgerInfoCompressionType = getString(AsyncLogConfigs.ML_INFO_COMPRESSION_TYPE);
+        this.managedLedgerInfoCompressionThresholdBytes = getInt(AsyncLogConfigs.ML_INFO_COMPRESSION_THRESHOLD_BYTES);
+        this.infoStatsPeriodSeconds = getInt(AsyncLogConfigs.ML_STATS_PERIOD_SECONDS);
+        // Managed Ledger Configs
+        this.ensembleSize = getInt(AsyncLogConfigs.BOOKKEEPER_ENSEMBLE_SIZE);
+        this.writeQuorumSize = getInt(AsyncLogConfigs.BOOKKEEPER_WRITE_QUORUM_SIZE);
+        this.ackQuorumSize = getInt(AsyncLogConfigs.BOOKKEEPER_ACK_QUORUM_SIZE);
+        this.ledgerDeleteMaxConcurrentRequests = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETE_MAX_CONCURRENT_REQUESTS);
+        this.ledgerDeletionThreads = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_DELETION_THREADS);
+        this.digestTypeName = getString(AsyncLogConfigs.BOOKKEEPER_DIGEST_TYPE);
+        this.password = getString(AsyncLogConfigs.BOOKKEEPER_PASSWORD);
+        this.maxEntriesPerLedger = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_ENTRIES_PER_LEDGER);
+        this.maxBytesPerLedgerMB = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_BYTES_PER_LEDGER_MB);
+        this.minRolloverTimeMinutes = getInt(AsyncLogConfigs.BOOKKEEPER_MIN_ROLLOVER_TIME_MINUTES);
+        this.maxRolloverTimeMinutes = getInt(AsyncLogConfigs.BOOKKEEPER_MAX_ROLLOVER_TIME_MINUTES);
+        this.metadataOperationTimeoutSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_OPERATION_TIMEOUT_SECONDS);
+        this.readEntryTimeoutSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_READ_ENTRY_TIMEOUT_SECONDS);
+        this.addEntryTimeoutSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_ADD_ENTRY_TIMEOUT_SECONDS);
+        this.defaultEnsembleSize = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_ENSEMBLE_SIZE);
+        this.defaultWriteQuorumSize = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_WRITE_QUORUM_SIZE);
+        this.defaultAckQuorumSize = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_ACK_QUORUM_SIZE);
+        this.defaultMaxEntriesPerLedger = getInt(AsyncLogConfigs.BOOKKEEPER_METADATA_MAX_ENTRIES_PER_LEDGER);
+        this.ledgerRolloverTimeoutSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_LEDGER_ROLLOVER_TIMEOUT_SECONDS);
+        this.retentionTimeSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_RETENTION_TIME_SECONDS);
+        this.retentionSizeMb = getInt(AsyncLogConfigs.BOOKKEEPER_RETENTION_SIZE_MB);
+        this.autoSkipNonRecoverableData = getBoolean(AsyncLogConfigs.BOOKKEEPER_AUTO_SKIP_NONRECORVERABLE_DATA);
+        this.ledgerForceRecovery = getBoolean(AsyncLogConfigs.BOOKKEEPER_LEDGER_FORCE_RECOVERY);
+        this.inactiveLedgerRolloverTimeSeconds = getInt(AsyncLogConfigs.BOOKKEEPER_INACTIVE_LEDGER_ROLLOVER_TIME_SECONDS);
+        this.metadataStoreUrl = getString(AsyncLogConfigs.BOOKKEEPER_METADATA_STORE_URL);
         remoteLogConfig = new RemoteLogConfig(this);
     }
 
@@ -488,6 +737,7 @@ public class LogConfig extends AbstractConfig {
      * Validates the values of the given properties. Can be called by both client and server.
      * The `props` supplied should contain all the LogConfig properties and the default values are extracted from the
      * LogConfig class.
+     *
      * @param props The properties to be validated
      */
     public static void validateValues(Map<String, ?> props) {
@@ -504,6 +754,7 @@ public class LogConfig extends AbstractConfig {
      * Validates the values of the given properties. Should be called only by the broker.
      * The `props` supplied doesn't contain any topic-level configs, only broker-level configs.
      * The default values should be extracted from the KafkaConfig.
+     *
      * @param props The properties to be validated
      */
     public static void validateBrokerLogConfigValues(Map<String, ?> props,
@@ -519,9 +770,10 @@ public class LogConfig extends AbstractConfig {
      * Validates the values of the given properties. Should be called only by the broker.
      * The `newConfigs` supplied contains the topic-level configs,
      * The default values should be extracted from the KafkaConfig.
-     * @param existingConfigs                   The existing properties
-     * @param newConfigs                        The new properties to be validated
-     * @param isRemoteLogStorageSystemEnabled   true if system wise remote log storage is enabled
+     *
+     * @param existingConfigs                 The existing properties
+     * @param newConfigs                      The new properties to be validated
+     * @param isRemoteLogStorageSystemEnabled true if system wise remote log storage is enabled
      */
     private static void validateTopicLogConfigValues(Map<String, String> existingConfigs,
                                                      Map<String, ?> newConfigs,
