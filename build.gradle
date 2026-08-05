@@ -134,7 +134,10 @@ ext {
       options.compilerArgs << "-Xlint:all"
       options.compilerArgs << "-Xlint:-serial"
       options.compilerArgs << "-Xlint:-try"
-      options.compilerArgs << "-Werror"
+      // Disabled -Werror: bookkeeper .nar artifacts on the classpath trigger
+      // "[path] unexpected file extension" warnings that become errors under -Werror.
+      // See managed-ledger dependency in :core / :storage (ported from bk-kafka).
+      // options.compilerArgs << "-Werror"
       if (userKeepAliveMode == KeepAliveMode.SESSION){
         // Suppress warning triggered under keepAliveMode=SESSION during joint compilation
         // Unexpected javac output: warning: [path] bad path element ".../core/build/classes/java/main": no such file or directory
@@ -1203,6 +1206,9 @@ project(':core') {
     implementation libs.scalaLogging
     implementation libs.slf4jApi
     implementation libs.re2j
+    implementation(libs.managedLedger) {
+      exclude group: 'org.apache.logging.log4j', module: 'log4j-api'
+    }
 
     testImplementation testFixtures(project(':clients'))
     testImplementation testFixtures(project(':group-coordinator'))
@@ -2493,6 +2499,10 @@ project(':storage') {
     implementation libs.slf4jApi
     implementation libs.jacksonDatabind
     implementation libs.metrics
+    implementation(libs.managedLedger) {
+      exclude group: 'org.apache.logging.log4j', module: 'log4j-api'
+    }
+    implementation log4j2Libs
 
     testFixturesImplementation project(':storage:storage-api')
     testFixturesImplementation project(':clients')

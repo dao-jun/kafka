@@ -18,7 +18,7 @@
  limitations under the License.
 -->
 
-<import-control pkg="org.apache.kafka">
+<import-control pkg="org.apache.kafka,org.apache.bookkeeper">
 
     <!-- THINK HARD ABOUT THE LAYERING OF THE PROJECT BEFORE CHANGING THIS FILE -->
 
@@ -32,6 +32,15 @@
     <allow pkg="java.security" />
     <allow pkg="javax.net.ssl" />
     <allow pkg="javax.security" />
+
+    <!-- Async kafka imports (ported from bk-kafka) -->
+    <allow pkg="org.apache.pulsar" />
+    <allow pkg="com.google" />
+    <allow pkg="org.apache.commons" />
+    <allow pkg="io.netty" />
+    <allow pkg="org.apache.bookkeeper" />
+    <allow pkg="javax.annotation" />
+    <allow pkg="io.opentelemetry" />
 
     <!-- no one depends on the server -->
     <disallow pkg="kafka" />

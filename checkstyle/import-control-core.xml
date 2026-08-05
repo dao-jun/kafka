@@ -45,6 +45,10 @@
   <disallow class="com.yammer.metrics.Metrics" />
   <allow pkg="com.yammer.metrics"/>
 
+  <!-- bookkeeper / pulsar imports (async log support, ported from bk-kafka) -->
+  <allow pkg="org.apache.pulsar" />
+  <allow pkg="org.apache.bookkeeper" />
+
   <subpackage name="tools">
     <allow pkg="joptsimple" />
   </subpackage>
