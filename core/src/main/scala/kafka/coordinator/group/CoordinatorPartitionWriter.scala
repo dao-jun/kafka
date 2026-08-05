@@ -168,7 +168,7 @@ class CoordinatorPartitionWriter(
   ): Long = {
     // We write synchronously to the leader replica without waiting on replication.
     val topicIdPartition: TopicIdPartition = replicaManager.topicIdPartition(tp)
-    val appendResultMap = replicaManager.appendRecordsToLeaderAsync(
+    val appendResults = replicaManager.appendRecordsToLeader(
       requiredAcks = 1,
       internalTopicsAllowed = true,
       origin = AppendOrigin.COORDINATOR,
@@ -180,10 +180,6 @@ class CoordinatorPartitionWriter(
       actionQueue = directActionQueue,
       transactionVersion = transactionVersion
     )
-
-    val appendResults = appendResultMap.map { case (partition, value) =>
-        partition -> value.join()
-    }
 
     val partitionResult = appendResults.getOrElse(topicIdPartition,
       throw new IllegalStateException(s"Append status $appendResults should have partition $tp."))
@@ -194,37 +190,6 @@ class CoordinatorPartitionWriter(
 
     // Required offset.
     partitionResult.logAppendSummary.lastOffset + 1
-  }
-
-  override def appendAsync(
-                            tp: TopicPartition,
-                            verificationGuard: VerificationGuard,
-                            records: MemoryRecords,
-                            transactionVersion: Short
-                          ): CompletableFuture[java.lang.Long] = {
-    val topicIdPartition: TopicIdPartition = replicaManager.topicIdPartition(tp)
-    val appendResultsMap = replicaManager.appendRecordsToLeaderAsync(
-      requiredAcks = 1,
-      internalTopicsAllowed = true,
-      origin = AppendOrigin.COORDINATOR,
-      entriesPerPartition = Map(topicIdPartition -> records),
-      requestLocal = RequestLocal.noCaching,
-      verificationGuards = Map(tp -> verificationGuard),
-      // We can directly complete the purgatories here because we don't hold
-      // any conflicting locks.
-      actionQueue = directActionQueue,
-      transactionVersion = transactionVersion
-    )
-    val future = appendResultsMap.get(topicIdPartition)
-    if (future.isEmpty) {
-      throw new IllegalStateException(s"Append status $appendResultsMap should have partition $tp.")
-    }
-    future.get.thenApply[Long](appendResult => appendResult.logAppendSummary().lastOffset + 1)
-      .exceptionally {
-        case e: Throwable => throw e
-        case _ => throw new IllegalStateException(s"Append status $appendResultsMap should have partition $tp.")
-      }
-      .asInstanceOf[CompletableFuture[java.lang.Long]]
   }
 
   override def deleteRecords(tp: TopicPartition, deleteBeforeOffset: Long): CompletableFuture[Void] = {

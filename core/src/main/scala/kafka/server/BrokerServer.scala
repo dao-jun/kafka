@@ -736,25 +736,14 @@ class BrokerServer(
       "group-coordinator-reaper",
       new SystemTimer("group-coordinator")
     )
-    val loader = if (!asyncLogModeEnable) {
-      new CoordinatorLoaderImpl[CoordinatorRecord](
-        time,
-        tp => replicaManager.getLog(tp).toJava,
-        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-        serde,
-        config.groupCoordinatorConfig.offsetsLoadBufferSize,
-        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-      )
-    } else {
-      new AsyncCoordinatorLoaderImpl[CoordinatorRecord](
-        time,
-        tp => replicaManager.getLog(tp).toJava,
-        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-        serde,
-        config.groupCoordinatorConfig.offsetsLoadBufferSize,
-        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-      )
-    }
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      time,
+      tp => replicaManager.getLog(tp).toJava,
+      tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+      serde,
+      config.groupCoordinatorConfig.offsetsLoadBufferSize,
+      CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+    )
     val writer = new CoordinatorPartitionWriter(
       replicaManager
     )
@@ -769,7 +758,6 @@ class BrokerServer(
       .withPersister(persister)
       .withAuthorizerPlugin(authorizerPlugin.toJava)
       .withPartitionMetadataClient(partitionMetadataClient)
-      .withAsyncCoordinator(false)
       .build()
   }
 
@@ -781,25 +769,14 @@ class BrokerServer(
     )
 
     val serde = new ShareCoordinatorRecordSerde
-    val loader = if (!asyncLogModeEnable) {
-      new CoordinatorLoaderImpl[CoordinatorRecord](
-        time,
-        tp => replicaManager.getLog(tp).toJava,
-        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-        serde,
-        config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
-        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-      )
-    } else {
-      new AsyncCoordinatorLoaderImpl[CoordinatorRecord](
-        time,
-        tp => replicaManager.getLog(tp).toJava,
-        tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
-        serde,
-        config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
-        CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
-      )
-    }
+    val loader = new CoordinatorLoaderImpl[CoordinatorRecord](
+      time,
+      tp => replicaManager.getLog(tp).toJava,
+      tp => replicaManager.getLogEndOffset(tp).map(Long.box).toJava,
+      serde,
+      config.shareCoordinatorConfig.shareCoordinatorLoadBufferSize(),
+      CoordinatorLoaderImpl.DEFAULT_COMMIT_INTERVAL_OFFSETS
+    )
     val writer = new CoordinatorPartitionWriter(
       replicaManager
     )
@@ -810,8 +787,6 @@ class BrokerServer(
       .withWriter(writer)
       .withCoordinatorRuntimeMetrics(new ShareCoordinatorRuntimeMetrics(metrics))
       .withCoordinatorMetrics(new ShareCoordinatorMetrics(metrics))
-      .withShareGroupEnabledConfigSupplier(() => true)
-      .withAsyncCoordinator(false)
       .build()
   }
 
